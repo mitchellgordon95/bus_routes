@@ -3,14 +3,16 @@
  * Supports formats:
  * - "308209" (just stop code)
  * - "308209 B63" (stop code + route)
- * - "Port Richmond Av and Orange Av S59" (intersection + route)
+ * - "stop 308209" (natural language)
+ * - "bus 308209 B63" (natural language with route)
+ * - "check 308209" (natural language)
  */
 class MessageParser {
   parse(messageBody) {
     const trimmed = messageBody.trim();
 
     // Check for refresh command
-    if (trimmed.toUpperCase() === 'R') {
+    if (trimmed.toUpperCase() === 'R' || trimmed.toUpperCase() === 'REFRESH') {
       return { type: 'refresh' };
     }
 
@@ -20,23 +22,26 @@ class MessageParser {
       return { type: 'service_changes', route };
     }
 
-    // Extract stop code and route
-    // Pattern: 6-digit number optionally followed by route
-    const stopCodeMatch = trimmed.match(/^(\d{6})(?:\s+([A-Z0-9\-]+))?$/i);
+    // Extract stop code and route - support natural language
+    // Patterns:
+    // - "stop 308209" or "bus 308209" or "check 308209"
+    // - "stop 308209 B63" (with route)
+    // - "308209" (bare stop code)
+    // - "308209 B63" (bare with route)
+    const naturalMatch = trimmed.match(/(?:stop|bus|check|query|when|times?)?\s*(\d{6})(?:\s+([A-Z0-9\-]+))?/i);
 
-    if (stopCodeMatch) {
+    if (naturalMatch) {
       return {
         type: 'stop_query',
-        stopCode: stopCodeMatch[1],
-        route: stopCodeMatch[2] ? stopCodeMatch[2].toUpperCase() : null
+        stopCode: naturalMatch[1],
+        route: naturalMatch[2] ? naturalMatch[2].toUpperCase() : null
       };
     }
 
-    // If no stop code pattern matched, try to parse as intersection
-    // This is more complex - for now, return error
+    // If no stop code pattern matched, return helpful error
     return {
       type: 'error',
-      message: 'Invalid format. Text a 6-digit stop code (e.g., "308209" or "308209 B63")'
+      message: 'Please send a bus stop code. Example: "stop 308209" or "bus 308209 B63". Find stop codes at bustime.mta.info'
     };
   }
 }

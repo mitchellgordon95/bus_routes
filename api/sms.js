@@ -37,6 +37,8 @@ module.exports = async (req, res) => {
         // Get bus arrivals
         const arrivalData = await mtaAPI.getStopArrivals(parsed.stopCode, parsed.route);
         responseText = mtaAPI.formatAsText(arrivalData);
+        // Add footer to make response more conversational
+        responseText += '\n\nText "refresh" to update or send another stop code.';
         break;
 
       case 'service_changes':

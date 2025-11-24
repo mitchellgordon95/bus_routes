@@ -76,27 +76,33 @@ class MTABusAPI {
    */
   formatAsText(parsedData, maxResults = 3) {
     if (!parsedData.found || parsedData.arrivals.length === 0) {
-      return 'No buses found for this stop. Check your stop code and try again.';
+      return 'No buses found arriving at this stop right now. Please check your stop code and try again, or visit bustime.mta.info for more info.';
     }
 
-    let message = `${parsedData.stopName}\n\n`;
+    // Add header to make message more conversational (avoid OTP filtering)
+    let message = `Bus arrivals at ${parsedData.stopName}:\n\n`;
 
     parsedData.arrivals.slice(0, maxResults).forEach((arrival, index) => {
       const stopsText = arrival.stopsAway === 0
-        ? 'at stop'
+        ? 'arriving now'
         : `${arrival.stopsAway} stop${arrival.stopsAway > 1 ? 's' : ''} away`;
 
-      message += `${arrival.route} to ${arrival.destination}\n`;
-      message += `${stopsText}`;
+      message += `Route ${arrival.route} to ${arrival.destination} - ${stopsText}`;
 
       if (!arrival.hasRealtimeData) {
-        message += ' (scheduled)';
+        message += ' (scheduled time)';
       }
 
       if (index < Math.min(maxResults, parsedData.arrivals.length) - 1) {
         message += '\n\n';
       }
     });
+
+    // Add footer with total count if more buses available
+    const totalBuses = parsedData.arrivals.length;
+    if (totalBuses > maxResults) {
+      message += `\n\n(Showing ${maxResults} of ${totalBuses} buses)`;
+    }
 
     return message;
   }
