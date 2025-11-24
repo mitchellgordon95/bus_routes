@@ -1,10 +1,5 @@
 {
   "version": 2,
-  "env": {
-    "MTA_API_KEY": "@mta_api_key",
-    "TWILIO_ACCOUNT_SID": "@twilio_account_sid",
-    "TWILIO_AUTH_TOKEN": "@twilio_auth_token"
-  },
   "builds": [
     {
       "src": "api/**/*.js",
