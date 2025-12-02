@@ -38,10 +38,18 @@ class MessageParser {
       };
     }
 
-    // If no stop code pattern matched, return helpful error
+    // Treat everything else as a food query (calorie estimation)
+    if (trimmed.length >= 2) {
+      return {
+        type: 'food_query',
+        foodDescription: trimmed
+      };
+    }
+
+    // Fallback for very short messages
     return {
       type: 'error',
-      message: 'Please send a bus stop code. Example: "stop 308209" or "bus 308209 B63". Find stop codes at bustime.mta.info'
+      message: 'Send a food description for calories, or a 6-digit stop code for bus times.'
     };
   }
 }

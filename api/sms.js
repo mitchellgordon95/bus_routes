@@ -1,8 +1,9 @@
 const twilio = require('twilio');
 
-// Import our MTA API client and message parser
+// Import our API clients and message parser
 // Vercel serverless functions can import from parent directory
 const MTABusAPI = require('../mta-api');
+const GeminiCalorieAPI = require('../gemini-api');
 const { MessageParser } = require('../message-handler');
 
 module.exports = async (req, res) => {
@@ -18,8 +19,9 @@ module.exports = async (req, res) => {
   console.log(`Received from ${fromNumber}: ${incomingMessage}`);
 
   try {
-    // Initialize MTA API with key from environment
+    // Initialize APIs with keys from environment
     const mtaAPI = new MTABusAPI(process.env.MTA_API_KEY);
+    const geminiAPI = new GeminiCalorieAPI(process.env.GEMINI_API_KEY);
     const parser = new MessageParser();
 
     // Parse the incoming message
@@ -46,9 +48,14 @@ module.exports = async (req, res) => {
         responseText = `Service changes for ${parsed.route}: Feature coming soon. Check mta.info for current alerts.`;
         break;
 
+      case 'food_query':
+        const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
+        responseText = geminiAPI.formatAsText(calorieData);
+        break;
+
       case 'error':
       default:
-        responseText = parsed.message || 'Invalid request. Text a 6-digit stop code (e.g., "308209" or "308209 B63")';
+        responseText = parsed.message || 'Send a food description for calories, or a 6-digit stop code for bus times.';
         break;
     }
 

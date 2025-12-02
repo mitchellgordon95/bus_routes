@@ -1,7 +1,8 @@
-require('dotenv').config();
+require('dotenv').config({ path: '.env.local' });
 const express = require('express');
 const twilio = require('twilio');
 const MTABusAPI = require('./mta-api');
+const GeminiCalorieAPI = require('./gemini-api');
 const { MessageParser, SessionManager } = require('./message-handler');
 
 const app = express();
@@ -9,6 +10,7 @@ const port = process.env.PORT || 3000;
 
 // Initialize services
 const mtaAPI = new MTABusAPI(process.env.MTA_API_KEY);
+const geminiAPI = new GeminiCalorieAPI(process.env.GEMINI_API_KEY);
 const parser = new MessageParser();
 const sessions = new SessionManager();
 
@@ -61,9 +63,14 @@ app.post('/sms', async (req, res) => {
         responseText = `Service changes for ${parsed.route}: Feature coming soon. Check mta.info for current alerts.`;
         break;
 
+      case 'food_query':
+        const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
+        responseText = geminiAPI.formatAsText(calorieData);
+        break;
+
       case 'error':
       default:
-        responseText = parsed.message || 'Invalid request. Text a 6-digit stop code (e.g., "308209" or "308209 B63")';
+        responseText = parsed.message || 'Send a food description for calories, or a 6-digit stop code for bus times.';
         break;
     }
 
@@ -90,9 +97,12 @@ app.listen(port, () => {
 
   // Validate required environment variables
   if (!process.env.MTA_API_KEY) {
-    console.warn('⚠️  Warning: MTA_API_KEY not set');
+    console.warn('Warning: MTA_API_KEY not set');
+  }
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('Warning: GEMINI_API_KEY not set - calorie features disabled');
   }
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
-    console.warn('⚠️  Warning: Twilio credentials not set');
+    console.warn('Warning: Twilio credentials not set');
   }
 });
