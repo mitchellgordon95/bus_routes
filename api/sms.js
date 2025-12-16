@@ -32,6 +32,9 @@ async function fetchTwilioMedia(mediaUrl) {
 }
 
 module.exports = async (req, res) => {
+  const requestStart = Date.now();
+  console.log('=== SMS Request Start ===');
+
   // Only allow POST requests
   if (req.method !== 'POST') {
     return res.status(405).send('Method Not Allowed');
@@ -54,18 +57,24 @@ module.exports = async (req, res) => {
 
     // Check for calorie reset command
     if (incomingMessage.toLowerCase().trim() === 'reset calories') {
+      const dbStart = Date.now();
       const previous = await resetToday();
+      console.log(`[TIMING] database-reset: ${Date.now() - dbStart}ms`);
       responseText = `Daily calories reset. Previous total was ${previous} cal.`;
     }
     // Check for daily total command
     else if (incomingMessage.toLowerCase().trim() === 'total') {
+      const dbStart = Date.now();
       const total = await getTodayTotal();
+      console.log(`[TIMING] database-get-total: ${Date.now() - dbStart}ms`);
       responseText = `Today's total: ${total} cal`;
     }
     // Check for subtract command (e.g., "sub 20")
     else if (/^sub\s+\d+$/i.test(incomingMessage.trim())) {
       const amount = parseInt(incomingMessage.trim().split(/\s+/)[1], 10);
+      const dbStart = Date.now();
       const newTotal = await subtractCalories(amount);
+      console.log(`[TIMING] database-subtract: ${Date.now() - dbStart}ms`);
       responseText = `Subtracted ${amount} cal.\n\nDaily total: ${newTotal} cal`;
     }
     // Check if this is an MMS with an image
@@ -76,17 +85,26 @@ module.exports = async (req, res) => {
       // Only process image types
       if (mediaType && mediaType.startsWith('image/')) {
         console.log(`Processing image: ${mediaType}`);
+
+        const fetchStart = Date.now();
         const { buffer, contentType } = await fetchTwilioMedia(mediaUrl);
+        console.log(`[TIMING] twilio-media-fetch: ${Date.now() - fetchStart}ms`);
+
+        const geminiStart = Date.now();
         const calorieData = await geminiAPI.estimateCaloriesFromImage(
           buffer,
           contentType,
           incomingMessage // Use any accompanying text as context
         );
+        console.log(`[TIMING] gemini-image-api: ${Date.now() - geminiStart}ms`);
+
         responseText = geminiAPI.formatAsText(calorieData);
 
         // Track calories if estimation succeeded
         if (calorieData.success && calorieData.totalCalories) {
+          const dbStart = Date.now();
           const dailyTotal = await addCalories(calorieData.totalCalories);
+          console.log(`[TIMING] database-add: ${Date.now() - dbStart}ms`);
           responseText += `\n\nDaily total: ${dailyTotal} cal`;
         }
       } else {
@@ -104,7 +122,9 @@ module.exports = async (req, res) => {
 
         case 'stop_query':
           // Get bus arrivals
+          const mtaStart = Date.now();
           const arrivalData = await mtaAPI.getStopArrivals(parsed.stopCode, parsed.route);
+          console.log(`[TIMING] mta-api: ${Date.now() - mtaStart}ms`);
           responseText = mtaAPI.formatAsText(arrivalData);
           // Add footer to make response more conversational
           responseText += '\n\nText "refresh" to update or send another stop code.';
@@ -116,12 +136,16 @@ module.exports = async (req, res) => {
           break;
 
         case 'food_query':
+          const geminiTextStart = Date.now();
           const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
+          console.log(`[TIMING] gemini-text-api: ${Date.now() - geminiTextStart}ms`);
           responseText = geminiAPI.formatAsText(calorieData);
 
           // Track calories if estimation succeeded
           if (calorieData.success && calorieData.totalCalories) {
+            const dbTextStart = Date.now();
             const dailyTotal = await addCalories(calorieData.totalCalories);
+            console.log(`[TIMING] database-add: ${Date.now() - dbTextStart}ms`);
             responseText += `\n\nDaily total: ${dailyTotal} cal`;
           }
           break;
@@ -139,6 +163,9 @@ module.exports = async (req, res) => {
     console.error('Error processing message:', error);
     twiml.message('Sorry, there was an error processing your request. Please try again later.');
   }
+
+  console.log(`[TIMING] total-request: ${Date.now() - requestStart}ms`);
+  console.log('=== SMS Request End ===');
 
   res.setHeader('Content-Type', 'text/xml');
   res.status(200).send(twiml.toString());

@@ -3,7 +3,12 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 class GeminiCalorieAPI {
   constructor(apiKey) {
     this.genAI = new GoogleGenerativeAI(apiKey);
-    this.model = this.genAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
+    this.model = this.genAI.getGenerativeModel({
+      model: 'gemini-3-pro-preview',
+      generationConfig: {
+        thinkingConfig: { thinkingLevel: 'low' }
+      }
+    });
   }
 
   /**
@@ -15,7 +20,9 @@ class GeminiCalorieAPI {
     const prompt = this.buildPrompt(foodDescription);
 
     try {
+      const genStart = Date.now();
       const result = await this.model.generateContent(prompt);
+      console.log(`[TIMING] gemini-generateContent-text: ${Date.now() - genStart}ms`);
       const response = result.response.text();
       return this.parseResponse(response, foodDescription);
     } catch (error) {
@@ -35,14 +42,18 @@ class GeminiCalorieAPI {
     const prompt = this.buildImagePrompt(textDescription);
 
     try {
+      const b64Start = Date.now();
       const imagePart = {
         inlineData: {
           data: imageBuffer.toString('base64'),
           mimeType: mimeType
         }
       };
+      console.log(`[TIMING] base64-encode: ${Date.now() - b64Start}ms (buffer size: ${imageBuffer.length} bytes)`);
 
+      const genStart = Date.now();
       const result = await this.model.generateContent([prompt, imagePart]);
+      console.log(`[TIMING] gemini-generateContent-image: ${Date.now() - genStart}ms`);
       const response = result.response.text();
       return this.parseResponse(response, textDescription || 'food image');
     } catch (error) {

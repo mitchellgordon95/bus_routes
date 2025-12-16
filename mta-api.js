@@ -28,7 +28,9 @@ class MTABusAPI {
         params.LineRef = `MTA NYCT_${routeFilter.toUpperCase()}`;
       }
 
+      const axiosStart = Date.now();
       const response = await axios.get(MTA_BASE_URL, { params });
+      console.log(`[TIMING] mta-axios-get: ${Date.now() - axiosStart}ms`);
 
       return this.parseResponse(response.data);
     } catch (error) {

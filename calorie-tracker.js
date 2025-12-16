@@ -4,12 +4,14 @@ const { sql } = require('@vercel/postgres');
  * Initialize the calories table if it doesn't exist
  */
 async function initTable() {
+  const start = Date.now();
   await sql`
     CREATE TABLE IF NOT EXISTS daily_calories (
       date DATE PRIMARY KEY,
       total INTEGER DEFAULT 0
     )
   `;
+  console.log(`[TIMING] db-initTable: ${Date.now() - start}ms`);
 }
 
 /**
@@ -29,6 +31,7 @@ async function addCalories(calories) {
   const today = getTodayKey();
   const amount = Math.round(calories);
 
+  const queryStart = Date.now();
   const { rows } = await sql`
     INSERT INTO daily_calories (date, total)
     VALUES (${today}, ${amount})
@@ -36,6 +39,7 @@ async function addCalories(calories) {
     DO UPDATE SET total = daily_calories.total + ${amount}
     RETURNING total
   `;
+  console.log(`[TIMING] db-addCalories-query: ${Date.now() - queryStart}ms`);
 
   return rows[0].total;
 }
@@ -48,9 +52,11 @@ async function getTodayTotal() {
   await initTable();
   const today = getTodayKey();
 
+  const queryStart = Date.now();
   const { rows } = await sql`
     SELECT total FROM daily_calories WHERE date = ${today}
   `;
+  console.log(`[TIMING] db-getTodayTotal-query: ${Date.now() - queryStart}ms`);
 
   return rows[0]?.total || 0;
 }
@@ -67,12 +73,14 @@ async function resetToday() {
   const previous = await getTodayTotal();
 
   // Reset to 0
+  const queryStart = Date.now();
   await sql`
     INSERT INTO daily_calories (date, total)
     VALUES (${today}, 0)
     ON CONFLICT (date)
     DO UPDATE SET total = 0
   `;
+  console.log(`[TIMING] db-resetToday-query: ${Date.now() - queryStart}ms`);
 
   return previous;
 }
@@ -87,6 +95,7 @@ async function subtractCalories(calories) {
   const today = getTodayKey();
   const amount = Math.round(calories);
 
+  const queryStart = Date.now();
   const { rows } = await sql`
     INSERT INTO daily_calories (date, total)
     VALUES (${today}, 0)
@@ -94,6 +103,7 @@ async function subtractCalories(calories) {
     DO UPDATE SET total = GREATEST(0, daily_calories.total - ${amount})
     RETURNING total
   `;
+  console.log(`[TIMING] db-subtractCalories-query: ${Date.now() - queryStart}ms`);
 
   return rows[0].total;
 }
