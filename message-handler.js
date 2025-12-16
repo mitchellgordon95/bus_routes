@@ -1,56 +1,92 @@
 /**
- * Parse incoming SMS message to extract stop code and optional route
- * Supports formats:
- * - "308209" (just stop code)
- * - "308209 B63" (stop code + route)
- * - "stop 308209" (natural language)
- * - "bus 308209 B63" (natural language with route)
- * - "check 308209" (natural language)
+ * Parse incoming SMS message and route to appropriate handler
+ * All command routing is centralized here.
  */
 class MessageParser {
-  parse(messageBody) {
+  /**
+   * Parse message and determine command type
+   * @param {string} messageBody - The SMS message text
+   * @param {boolean} hasMedia - Whether the message has media attached
+   * @param {string} mediaType - MIME type of attached media (if any)
+   * @returns {Object} Parsed command with type and relevant data
+   */
+  parse(messageBody, hasMedia = false, mediaType = null) {
     const trimmed = messageBody.trim();
+    const lower = trimmed.toLowerCase();
 
-    // Check for refresh command
-    if (trimmed.toUpperCase() === 'R' || trimmed.toUpperCase() === 'REFRESH') {
+    // Help command ("help" is reserved by Twilio, so we use "how")
+    if (lower === 'how' || lower === '?') {
+      return { type: 'help' };
+    }
+
+    // Calorie reset
+    if (lower === 'reset calories') {
+      return { type: 'reset_calories' };
+    }
+
+    // Daily total
+    if (lower === 'total') {
+      return { type: 'total' };
+    }
+
+    // Subtract calories (e.g., "sub 20")
+    const subMatch = lower.match(/^sub\s+(\d+)$/);
+    if (subMatch) {
+      return { type: 'subtract', amount: parseInt(subMatch[1], 10) };
+    }
+
+    // MMS with image - process as calorie estimation
+    if (hasMedia && mediaType?.startsWith('image/')) {
+      return { type: 'image_calorie', textContext: trimmed };
+    }
+
+    // Refresh command
+    if (lower === 'r' || lower === 'refresh') {
       return { type: 'refresh' };
     }
 
-    // Check for service changes command (e.g., "C S79-SBS")
-    if (trimmed.toUpperCase().startsWith('C ')) {
-      const route = trimmed.substring(2).trim();
-      return { type: 'service_changes', route };
+    // Service changes (C <route>)
+    if (lower.startsWith('c ')) {
+      return { type: 'service_changes', route: trimmed.substring(2).trim().toUpperCase() };
     }
 
-    // Extract stop code and route - support natural language
-    // Patterns:
-    // - "stop 308209" or "bus 308209" or "check 308209"
-    // - "stop 308209 B63" (with route)
-    // - "308209" (bare stop code)
-    // - "308209 B63" (bare with route)
-    const naturalMatch = trimmed.match(/(?:stop|bus|check|query|when|times?)?\s*(\d{6})(?:\s+([A-Z0-9\-]+))?/i);
-
-    if (naturalMatch) {
+    // Bus stop query (6-digit code with optional route)
+    const stopMatch = trimmed.match(/(?:stop|bus|check|query|when|times?)?\s*(\d{6})(?:\s+([A-Z0-9\-]+))?/i);
+    if (stopMatch) {
       return {
         type: 'stop_query',
-        stopCode: naturalMatch[1],
-        route: naturalMatch[2] ? naturalMatch[2].toUpperCase() : null
+        stopCode: stopMatch[1],
+        route: stopMatch[2]?.toUpperCase() || null
       };
     }
 
-    // Treat everything else as a food query (calorie estimation)
+    // Food query (fallback for text >= 2 chars)
     if (trimmed.length >= 2) {
-      return {
-        type: 'food_query',
-        foodDescription: trimmed
-      };
+      return { type: 'food_query', foodDescription: trimmed };
     }
 
-    // Fallback for very short messages
-    return {
-      type: 'error',
-      message: 'Send a food description for calories, or a 6-digit stop code for bus times.'
-    };
+    // Error fallback
+    return { type: 'error', message: 'Send "how" for available commands.' };
+  }
+
+  /**
+   * Get help text describing all available commands
+   * @returns {string} Help message
+   */
+  getHelpText() {
+    return `Bus Times:
+• Send 6-digit stop code (e.g., 308209)
+• Add route to filter (e.g., 308209 B63)
+
+Calorie Tracking:
+• Send food description (e.g., "2 eggs and toast")
+• Send photo of food for estimation
+• "total" - see today's calories
+• "sub 50" - subtract 50 calories
+• "reset calories" - start fresh
+
+Other:
+• "how" - show this message`;
   }
 }
 

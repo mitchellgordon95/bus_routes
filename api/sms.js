@@ -53,37 +53,42 @@ module.exports = async (req, res) => {
     const geminiAPI = new GeminiCalorieAPI(process.env.GEMINI_API_KEY);
     const parser = new MessageParser();
 
+    // Parse message through unified router
+    const parsed = parser.parse(incomingMessage, numMedia > 0, req.body.MediaContentType0);
     let responseText;
 
-    // Check for calorie reset command
-    if (incomingMessage.toLowerCase().trim() === 'reset calories') {
-      const dbStart = Date.now();
-      const previous = await resetToday();
-      console.log(`[TIMING] database-reset: ${Date.now() - dbStart}ms`);
-      responseText = `Daily calories reset. Previous total was ${previous} cal.`;
-    }
-    // Check for daily total command
-    else if (incomingMessage.toLowerCase().trim() === 'total') {
-      const dbStart = Date.now();
-      const total = await getTodayTotal();
-      console.log(`[TIMING] database-get-total: ${Date.now() - dbStart}ms`);
-      responseText = `Today's total: ${total} cal`;
-    }
-    // Check for subtract command (e.g., "sub 20")
-    else if (/^sub\s+\d+$/i.test(incomingMessage.trim())) {
-      const amount = parseInt(incomingMessage.trim().split(/\s+/)[1], 10);
-      const dbStart = Date.now();
-      const newTotal = await subtractCalories(amount);
-      console.log(`[TIMING] database-subtract: ${Date.now() - dbStart}ms`);
-      responseText = `Subtracted ${amount} cal.\n\nDaily total: ${newTotal} cal`;
-    }
-    // Check if this is an MMS with an image
-    else if (numMedia > 0) {
-      const mediaUrl = req.body.MediaUrl0;
-      const mediaType = req.body.MediaContentType0;
+    switch (parsed.type) {
+      case 'help':
+        responseText = parser.getHelpText();
+        break;
 
-      // Only process image types
-      if (mediaType && mediaType.startsWith('image/')) {
+      case 'reset_calories': {
+        const dbStart = Date.now();
+        const previous = await resetToday();
+        console.log(`[TIMING] database-reset: ${Date.now() - dbStart}ms`);
+        responseText = `Daily calories reset. Previous total was ${previous} cal.`;
+        break;
+      }
+
+      case 'total': {
+        const dbStart = Date.now();
+        const total = await getTodayTotal();
+        console.log(`[TIMING] database-get-total: ${Date.now() - dbStart}ms`);
+        responseText = `Today's total: ${total} cal`;
+        break;
+      }
+
+      case 'subtract': {
+        const dbStart = Date.now();
+        const newTotal = await subtractCalories(parsed.amount);
+        console.log(`[TIMING] database-subtract: ${Date.now() - dbStart}ms`);
+        responseText = `Subtracted ${parsed.amount} cal.\n\nDaily total: ${newTotal} cal`;
+        break;
+      }
+
+      case 'image_calorie': {
+        const mediaUrl = req.body.MediaUrl0;
+        const mediaType = req.body.MediaContentType0;
         console.log(`Processing image: ${mediaType}`);
 
         const fetchStart = Date.now();
@@ -94,67 +99,57 @@ module.exports = async (req, res) => {
         const calorieData = await geminiAPI.estimateCaloriesFromImage(
           buffer,
           contentType,
-          incomingMessage // Use any accompanying text as context
+          parsed.textContext
         );
         console.log(`[TIMING] gemini-image-api: ${Date.now() - geminiStart}ms`);
 
         responseText = geminiAPI.formatAsText(calorieData);
 
-        // Track calories if estimation succeeded
         if (calorieData.success && calorieData.totalCalories) {
           const dbStart = Date.now();
           const dailyTotal = await addCalories(calorieData.totalCalories);
           console.log(`[TIMING] database-add: ${Date.now() - dbStart}ms`);
           responseText += `\n\nDaily total: ${dailyTotal} cal`;
         }
-      } else {
-        responseText = 'Please send a photo of food for calorie estimation, or text a food description.';
+        break;
       }
-    } else {
-      // Parse the incoming text message
-      const parsed = parser.parse(incomingMessage);
 
-      switch (parsed.type) {
-        case 'refresh':
-          // Refresh not supported in serverless without persistent storage
-          responseText = 'Refresh not available. Please send your stop code again.';
-          break;
+      case 'refresh':
+        responseText = 'Refresh not available. Please send your stop code again.';
+        break;
 
-        case 'stop_query':
-          // Get bus arrivals
-          const mtaStart = Date.now();
-          const arrivalData = await mtaAPI.getStopArrivals(parsed.stopCode, parsed.route);
-          console.log(`[TIMING] mta-api: ${Date.now() - mtaStart}ms`);
-          responseText = mtaAPI.formatAsText(arrivalData);
-          // Add footer to make response more conversational
-          responseText += '\n\nText "refresh" to update or send another stop code.';
-          break;
-
-        case 'service_changes':
-          // Service changes not implemented yet
-          responseText = `Service changes for ${parsed.route}: Feature coming soon. Check mta.info for current alerts.`;
-          break;
-
-        case 'food_query':
-          const geminiTextStart = Date.now();
-          const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
-          console.log(`[TIMING] gemini-text-api: ${Date.now() - geminiTextStart}ms`);
-          responseText = geminiAPI.formatAsText(calorieData);
-
-          // Track calories if estimation succeeded
-          if (calorieData.success && calorieData.totalCalories) {
-            const dbTextStart = Date.now();
-            const dailyTotal = await addCalories(calorieData.totalCalories);
-            console.log(`[TIMING] database-add: ${Date.now() - dbTextStart}ms`);
-            responseText += `\n\nDaily total: ${dailyTotal} cal`;
-          }
-          break;
-
-        case 'error':
-        default:
-          responseText = parsed.message || 'Send a food description for calories, or a 6-digit stop code for bus times.';
-          break;
+      case 'stop_query': {
+        const mtaStart = Date.now();
+        const arrivalData = await mtaAPI.getStopArrivals(parsed.stopCode, parsed.route);
+        console.log(`[TIMING] mta-api: ${Date.now() - mtaStart}ms`);
+        responseText = mtaAPI.formatAsText(arrivalData);
+        responseText += '\n\nText "how" for all commands.';
+        break;
       }
+
+      case 'service_changes':
+        responseText = `Service changes for ${parsed.route}: Feature coming soon. Check mta.info for current alerts.`;
+        break;
+
+      case 'food_query': {
+        const geminiStart = Date.now();
+        const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
+        console.log(`[TIMING] gemini-text-api: ${Date.now() - geminiStart}ms`);
+        responseText = geminiAPI.formatAsText(calorieData);
+
+        if (calorieData.success && calorieData.totalCalories) {
+          const dbStart = Date.now();
+          const dailyTotal = await addCalories(calorieData.totalCalories);
+          console.log(`[TIMING] database-add: ${Date.now() - dbStart}ms`);
+          responseText += `\n\nDaily total: ${dailyTotal} cal`;
+        }
+        break;
+      }
+
+      case 'error':
+      default:
+        responseText = parsed.message || 'Send "how" for available commands.';
+        break;
     }
 
     twiml.message(responseText);
