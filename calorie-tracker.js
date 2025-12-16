@@ -1,5 +1,7 @@
 const { sql } = require('@vercel/postgres');
 
+const DEFAULT_TARGET = 1800;
+
 /**
  * Initialize the calories table if it doesn't exist
  */
@@ -9,6 +11,12 @@ async function initTable() {
     CREATE TABLE IF NOT EXISTS daily_calories (
       date DATE PRIMARY KEY,
       total INTEGER DEFAULT 0
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
     )
   `;
   console.log(`[TIMING] db-initTable: ${Date.now() - start}ms`);
@@ -108,4 +116,41 @@ async function subtractCalories(calories) {
   return rows[0].total;
 }
 
-module.exports = { addCalories, subtractCalories, getTodayTotal, resetToday };
+/**
+ * Get the daily calorie target
+ * @returns {Promise<number>}
+ */
+async function getTarget() {
+  await initTable();
+
+  const queryStart = Date.now();
+  const { rows } = await sql`
+    SELECT value FROM settings WHERE key = 'calorie_target'
+  `;
+  console.log(`[TIMING] db-getTarget-query: ${Date.now() - queryStart}ms`);
+
+  return rows[0] ? parseInt(rows[0].value, 10) : DEFAULT_TARGET;
+}
+
+/**
+ * Set the daily calorie target
+ * @param {number} target - New target
+ * @returns {Promise<number>} The new target
+ */
+async function setTarget(target) {
+  await initTable();
+  const value = Math.round(target).toString();
+
+  const queryStart = Date.now();
+  await sql`
+    INSERT INTO settings (key, value)
+    VALUES ('calorie_target', ${value})
+    ON CONFLICT (key)
+    DO UPDATE SET value = ${value}
+  `;
+  console.log(`[TIMING] db-setTarget-query: ${Date.now() - queryStart}ms`);
+
+  return parseInt(value, 10);
+}
+
+module.exports = { addCalories, subtractCalories, getTodayTotal, resetToday, getTarget, setTarget };

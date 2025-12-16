@@ -5,7 +5,7 @@ const twilio = require('twilio');
 const MTABusAPI = require('../mta-api');
 const GeminiCalorieAPI = require('../gemini-api');
 const { MessageParser } = require('../message-handler');
-const { addCalories, subtractCalories, getTodayTotal, resetToday } = require('../calorie-tracker');
+const { addCalories, subtractCalories, getTodayTotal, resetToday, getTarget, setTarget } = require('../calorie-tracker');
 
 /**
  * Fetch image from Twilio MMS URL
@@ -72,17 +72,25 @@ module.exports = async (req, res) => {
 
       case 'total': {
         const dbStart = Date.now();
-        const total = await getTodayTotal();
+        const [total, target] = await Promise.all([getTodayTotal(), getTarget()]);
         console.log(`[TIMING] database-get-total: ${Date.now() - dbStart}ms`);
-        responseText = `Today's total: ${total} cal`;
+        responseText = `Today's total: ${total} / ${target} cal`;
         break;
       }
 
       case 'subtract': {
         const dbStart = Date.now();
-        const newTotal = await subtractCalories(parsed.amount);
+        const [newTotal, target] = await Promise.all([subtractCalories(parsed.amount), getTarget()]);
         console.log(`[TIMING] database-subtract: ${Date.now() - dbStart}ms`);
-        responseText = `Subtracted ${parsed.amount} cal.\n\nDaily total: ${newTotal} cal`;
+        responseText = `Subtracted ${parsed.amount} cal.\n\nDaily total: ${newTotal} / ${target} cal`;
+        break;
+      }
+
+      case 'set_target': {
+        const dbStart = Date.now();
+        const newTarget = await setTarget(parsed.amount);
+        console.log(`[TIMING] database-set-target: ${Date.now() - dbStart}ms`);
+        responseText = `Daily target set to ${newTarget} cal.`;
         break;
       }
 
@@ -107,9 +115,9 @@ module.exports = async (req, res) => {
 
         if (calorieData.success && calorieData.totalCalories) {
           const dbStart = Date.now();
-          const dailyTotal = await addCalories(calorieData.totalCalories);
+          const [dailyTotal, target] = await Promise.all([addCalories(calorieData.totalCalories), getTarget()]);
           console.log(`[TIMING] database-add: ${Date.now() - dbStart}ms`);
-          responseText += `\n\nDaily total: ${dailyTotal} cal`;
+          responseText += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
         }
         break;
       }
@@ -139,9 +147,9 @@ module.exports = async (req, res) => {
 
         if (calorieData.success && calorieData.totalCalories) {
           const dbStart = Date.now();
-          const dailyTotal = await addCalories(calorieData.totalCalories);
+          const [dailyTotal, target] = await Promise.all([addCalories(calorieData.totalCalories), getTarget()]);
           console.log(`[TIMING] database-add: ${Date.now() - dbStart}ms`);
-          responseText += `\n\nDaily total: ${dailyTotal} cal`;
+          responseText += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
         }
         break;
       }

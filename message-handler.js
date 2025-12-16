@@ -35,6 +35,12 @@ class MessageParser {
       return { type: 'subtract', amount: parseInt(subMatch[1], 10) };
     }
 
+    // Set target (e.g., "target 2000")
+    const targetMatch = lower.match(/^target\s+(\d+)$/);
+    if (targetMatch) {
+      return { type: 'set_target', amount: parseInt(targetMatch[1], 10) };
+    }
+
     // MMS with image - process as calorie estimation
     if (hasMedia && mediaType?.startsWith('image/')) {
       return { type: 'image_calorie', textContext: trimmed };
@@ -83,6 +89,7 @@ Calorie Tracking:
 • Send photo of food for estimation
 • "total" - see today's calories
 • "sub 50" - subtract 50 calories
+• "target 2000" - set daily goal
 • "reset calories" - start fresh
 
 Other:
