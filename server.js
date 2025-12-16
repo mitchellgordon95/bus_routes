@@ -4,6 +4,7 @@ const twilio = require('twilio');
 const MTABusAPI = require('./mta-api');
 const GeminiCalorieAPI = require('./gemini-api');
 const { MessageParser, SessionManager } = require('./message-handler');
+const { addCalories, subtractCalories, getTodayTotal, resetToday } = require('./calorie-tracker');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -58,8 +59,24 @@ app.post('/sms', async (req, res) => {
   try {
     let responseText;
 
+    // Check for calorie reset command
+    if (incomingMessage.toLowerCase().trim() === 'reset calories') {
+      const previous = await resetToday();
+      responseText = `Daily calories reset. Previous total was ${previous} cal.`;
+    }
+    // Check for daily total command
+    else if (incomingMessage.toLowerCase().trim() === 'total') {
+      const total = await getTodayTotal();
+      responseText = `Today's total: ${total} cal`;
+    }
+    // Check for subtract command (e.g., "sub 20")
+    else if (/^sub\s+\d+$/i.test(incomingMessage.trim())) {
+      const amount = parseInt(incomingMessage.trim().split(/\s+/)[1], 10);
+      const newTotal = await subtractCalories(amount);
+      responseText = `Subtracted ${amount} cal.\n\nDaily total: ${newTotal} cal`;
+    }
     // Check if this is an MMS with an image
-    if (numMedia > 0) {
+    else if (numMedia > 0) {
       const mediaUrl = req.body.MediaUrl0;
       const mediaType = req.body.MediaContentType0;
 
@@ -73,6 +90,12 @@ app.post('/sms', async (req, res) => {
           incomingMessage // Use any accompanying text as context
         );
         responseText = geminiAPI.formatAsText(calorieData);
+
+        // Track calories if estimation succeeded
+        if (calorieData.success && calorieData.totalCalories) {
+          const dailyTotal = await addCalories(calorieData.totalCalories);
+          responseText += `\n\nDaily total: ${dailyTotal} cal`;
+        }
       } else {
         responseText = 'Please send a photo of food for calorie estimation, or text a food description.';
       }
@@ -110,6 +133,12 @@ app.post('/sms', async (req, res) => {
         case 'food_query':
           const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
           responseText = geminiAPI.formatAsText(calorieData);
+
+          // Track calories if estimation succeeded
+          if (calorieData.success && calorieData.totalCalories) {
+            const dailyTotal = await addCalories(calorieData.totalCalories);
+            responseText += `\n\nDaily total: ${dailyTotal} cal`;
+          }
           break;
 
         case 'error':
