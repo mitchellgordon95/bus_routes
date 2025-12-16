@@ -24,6 +24,53 @@ class GeminiCalorieAPI {
     }
   }
 
+  /**
+   * Estimate calories from a food image
+   * @param {Buffer} imageBuffer - Image data as a buffer
+   * @param {string} mimeType - MIME type of the image (e.g., 'image/jpeg')
+   * @param {string} [textDescription] - Optional text description to accompany the image
+   * @returns {Promise<Object>} Calorie estimation result
+   */
+  async estimateCaloriesFromImage(imageBuffer, mimeType, textDescription = '') {
+    const prompt = this.buildImagePrompt(textDescription);
+
+    try {
+      const imagePart = {
+        inlineData: {
+          data: imageBuffer.toString('base64'),
+          mimeType: mimeType
+        }
+      };
+
+      const result = await this.model.generateContent([prompt, imagePart]);
+      const response = result.response.text();
+      return this.parseResponse(response, textDescription || 'food image');
+    } catch (error) {
+      console.error('Gemini API Error:', error.message);
+      throw new Error('Unable to estimate calories from image');
+    }
+  }
+
+  buildImagePrompt(textDescription) {
+    const basePrompt = `You are a nutrition expert. Look at this food image and estimate the calories.`;
+    const contextLine = textDescription
+      ? `\n\nThe user also provided this description: "${textDescription}"`
+      : '';
+
+    return `${basePrompt}${contextLine}
+
+Respond in this EXACT JSON format (no markdown, no code blocks):
+{"items":[{"name":"item name","calories":123,"portion":"portion size"}],"totalCalories":456,"confidence":"high","notes":null}
+
+Rules:
+- Be concise, SMS has character limits
+- Identify all visible food items in the image
+- Estimate reasonable portion sizes based on visual cues
+- If image is unclear or not food, set confidence to "low" and explain in notes
+- Round calories to nearest 5
+- confidence must be "high", "medium", or "low"`;
+  }
+
   buildPrompt(foodDescription) {
     return `You are a nutrition expert. Estimate the calories for this food:
 
