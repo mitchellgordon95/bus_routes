@@ -41,6 +41,16 @@ class MessageParser {
       return { type: 'set_target', amount: parseInt(targetMatch[1], 10) };
     }
 
+    // Suggestions (e.g., "suggest 250" or "suggest 250 sweet")
+    const suggestMatch = trimmed.match(/^suggest\s+(\d+)(?:\s+(.+))?$/i);
+    if (suggestMatch) {
+      return {
+        type: 'suggestions',
+        calories: parseInt(suggestMatch[1], 10),
+        descriptors: suggestMatch[2] || null
+      };
+    }
+
     // MMS with image - process as calorie estimation
     if (hasMedia && mediaType?.startsWith('image/')) {
       return { type: 'image_calorie', textContext: trimmed };
@@ -90,6 +100,7 @@ Calorie Tracking:
 • "total" - see today's calories
 • "sub 50" - subtract 50 calories
 • "target 2000" - set daily goal
+• "suggest 300 sweet" - get food ideas
 • "reset calories" - start fresh
 
 Other:

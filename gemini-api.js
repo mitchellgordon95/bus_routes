@@ -62,6 +62,33 @@ class GeminiCalorieAPI {
     }
   }
 
+  /**
+   * Get food suggestions for a calorie target
+   * @param {number} calories - Target calories
+   * @param {string} [descriptors] - Optional descriptors like "sweet", "savory", "healthy"
+   * @returns {Promise<string>} Suggestions text
+   */
+  async getSuggestions(calories, descriptors = null) {
+    const descriptorText = descriptors ? ` that are ${descriptors}` : '';
+    const prompt = `Suggest 3-4 food options${descriptorText} that are approximately ${calories} calories each.
+
+Keep it brief for SMS. Format as a simple list like:
+• Food item 1 (~XXX cal)
+• Food item 2 (~XXX cal)
+
+No introductions or explanations, just the list.`;
+
+    try {
+      const genStart = Date.now();
+      const result = await this.model.generateContent(prompt);
+      console.log(`[TIMING] gemini-generateContent-suggestions: ${Date.now() - genStart}ms`);
+      return result.response.text().trim();
+    } catch (error) {
+      console.error('Gemini API Error:', error.message);
+      throw new Error('Unable to get suggestions');
+    }
+  }
+
   buildImagePrompt(textDescription) {
     const basePrompt = `You are a nutrition expert. Look at this food image and estimate the calories.`;
     const contextLine = textDescription

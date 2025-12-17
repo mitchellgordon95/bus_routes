@@ -94,6 +94,13 @@ module.exports = async (req, res) => {
         break;
       }
 
+      case 'suggestions': {
+        const geminiStart = Date.now();
+        responseText = await geminiAPI.getSuggestions(parsed.calories, parsed.descriptors);
+        console.log(`[TIMING] gemini-suggestions: ${Date.now() - geminiStart}ms`);
+        break;
+      }
+
       case 'image_calorie': {
         const mediaUrl = req.body.MediaUrl0;
         const mediaType = req.body.MediaContentType0;
