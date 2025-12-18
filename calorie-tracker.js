@@ -23,10 +23,10 @@ async function initTable() {
 }
 
 /**
- * Get today's date key (YYYY-MM-DD)
+ * Get today's date key (YYYY-MM-DD) in Eastern Time
  */
 function getTodayKey() {
-  return new Date().toISOString().split('T')[0];
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }
 
 /**
