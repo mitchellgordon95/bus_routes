@@ -49,8 +49,6 @@ cp .env.example .env
 MTA_API_KEY=your_mta_key_from_email
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
-TWILIO_PHONE_NUMBER=+1234567890
-PORT=3000
 ```
 
 ## Step 4: Test the MTA API (1 minute)
