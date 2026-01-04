@@ -19,6 +19,27 @@ class MessageParser {
       return { type: 'help' };
     }
 
+    // Uber commands (check specific commands before general pattern)
+    if (lower === 'uber confirm') {
+      return { type: 'uber_confirm' };
+    }
+    if (lower === 'uber status') {
+      return { type: 'uber_status' };
+    }
+    if (lower === 'uber cancel') {
+      return { type: 'uber_cancel' };
+    }
+
+    // Uber ride quote: "uber [pickup] to [destination]"
+    const uberMatch = lower.match(/^uber\s+(.+?)\s+to\s+(.+)$/);
+    if (uberMatch) {
+      return {
+        type: 'uber_quote',
+        pickup: uberMatch[1].trim(),
+        destination: uberMatch[2].trim()
+      };
+    }
+
     // Calorie reset
     if (lower === 'reset calories') {
       return { type: 'reset_calories' };
@@ -102,6 +123,12 @@ Calorie Tracking:
 • "target 2000" - set daily goal
 • "suggest 300 sweet" - get food ideas
 • "reset calories" - start fresh
+
+Uber:
+• "uber [pickup] to [dest]" - get quote
+• "uber confirm" - book the ride
+• "uber status" - check ride status
+• "uber cancel" - cancel ride
 
 Other:
 • "how" - show this message`;

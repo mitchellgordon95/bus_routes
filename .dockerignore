@@ -1,0 +1,12 @@
+node_modules
+.git
+.gitignore
+.env
+.env.local
+.env.example
+.DS_Store
+.vercel
+.claude
+*.md
+test-*.js
+npm-debug.log
