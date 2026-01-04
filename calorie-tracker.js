@@ -1,24 +1,30 @@
-const { sql } = require('@vercel/postgres');
+const { Pool } = require('pg');
 
 const DEFAULT_TARGET = 1800;
+
+// Create a connection pool using DATABASE_URL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('railway.internal') ? false : { rejectUnauthorized: false }
+});
 
 /**
  * Initialize the calories table if it doesn't exist
  */
 async function initTable() {
   const start = Date.now();
-  await sql`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS daily_calories (
       date DATE PRIMARY KEY,
       total INTEGER DEFAULT 0
     )
-  `;
-  await sql`
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT
     )
-  `;
+  `);
   console.log(`[TIMING] db-initTable: ${Date.now() - start}ms`);
 }
 
@@ -40,13 +46,13 @@ async function addCalories(calories) {
   const amount = Math.round(calories);
 
   const queryStart = Date.now();
-  const { rows } = await sql`
+  const { rows } = await pool.query(`
     INSERT INTO daily_calories (date, total)
-    VALUES (${today}, ${amount})
+    VALUES ($1, $2)
     ON CONFLICT (date)
-    DO UPDATE SET total = daily_calories.total + ${amount}
+    DO UPDATE SET total = daily_calories.total + $2
     RETURNING total
-  `;
+  `, [today, amount]);
   console.log(`[TIMING] db-addCalories-query: ${Date.now() - queryStart}ms`);
 
   return rows[0].total;
@@ -61,9 +67,9 @@ async function getTodayTotal() {
   const today = getTodayKey();
 
   const queryStart = Date.now();
-  const { rows } = await sql`
-    SELECT total FROM daily_calories WHERE date = ${today}
-  `;
+  const { rows } = await pool.query(`
+    SELECT total FROM daily_calories WHERE date = $1
+  `, [today]);
   console.log(`[TIMING] db-getTodayTotal-query: ${Date.now() - queryStart}ms`);
 
   return rows[0]?.total || 0;
@@ -82,12 +88,12 @@ async function resetToday() {
 
   // Reset to 0
   const queryStart = Date.now();
-  await sql`
+  await pool.query(`
     INSERT INTO daily_calories (date, total)
-    VALUES (${today}, 0)
+    VALUES ($1, 0)
     ON CONFLICT (date)
     DO UPDATE SET total = 0
-  `;
+  `, [today]);
   console.log(`[TIMING] db-resetToday-query: ${Date.now() - queryStart}ms`);
 
   return previous;
@@ -104,13 +110,13 @@ async function subtractCalories(calories) {
   const amount = Math.round(calories);
 
   const queryStart = Date.now();
-  const { rows } = await sql`
+  const { rows } = await pool.query(`
     INSERT INTO daily_calories (date, total)
-    VALUES (${today}, 0)
+    VALUES ($1, 0)
     ON CONFLICT (date)
-    DO UPDATE SET total = GREATEST(0, daily_calories.total - ${amount})
+    DO UPDATE SET total = GREATEST(0, daily_calories.total - $2)
     RETURNING total
-  `;
+  `, [today, amount]);
   console.log(`[TIMING] db-subtractCalories-query: ${Date.now() - queryStart}ms`);
 
   return rows[0].total;
@@ -124,9 +130,9 @@ async function getTarget() {
   await initTable();
 
   const queryStart = Date.now();
-  const { rows } = await sql`
+  const { rows } = await pool.query(`
     SELECT value FROM settings WHERE key = 'calorie_target'
-  `;
+  `);
   console.log(`[TIMING] db-getTarget-query: ${Date.now() - queryStart}ms`);
 
   return rows[0] ? parseInt(rows[0].value, 10) : DEFAULT_TARGET;
@@ -142,12 +148,12 @@ async function setTarget(target) {
   const value = Math.round(target).toString();
 
   const queryStart = Date.now();
-  await sql`
+  await pool.query(`
     INSERT INTO settings (key, value)
-    VALUES ('calorie_target', ${value})
+    VALUES ('calorie_target', $1)
     ON CONFLICT (key)
-    DO UPDATE SET value = ${value}
-  `;
+    DO UPDATE SET value = $1
+  `, [value]);
   console.log(`[TIMING] db-setTarget-query: ${Date.now() - queryStart}ms`);
 
   return parseInt(value, 10);

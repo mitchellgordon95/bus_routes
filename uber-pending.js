@@ -1,13 +1,19 @@
-const { sql } = require('@vercel/postgres');
+const { Pool } = require('pg');
 
 const EXPIRY_MINUTES = 10;
+
+// Create a connection pool using DATABASE_URL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('railway.internal') ? false : { rejectUnauthorized: false }
+});
 
 /**
  * Initialize the pending uber rides table if it doesn't exist
  */
 async function initTable() {
   const start = Date.now();
-  await sql`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS pending_uber_rides (
       phone VARCHAR(20) PRIMARY KEY,
       pickup_address TEXT NOT NULL,
@@ -21,52 +27,58 @@ async function initTable() {
       price_estimate TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     )
-  `;
+  `);
   // Also create table for active rides
-  await sql`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS active_uber_rides (
       phone VARCHAR(20) PRIMARY KEY,
       request_id TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     )
-  `;
+  `);
   console.log(`[TIMING] uber-db-initTable: ${Date.now() - start}ms`);
 }
 
 /**
  * Save a pending ride quote for later confirmation
  * @param {string} phone - User's phone number
- * @param {Object} quote - Quote from UberAPI.getQuote()
+ * @param {Object} quote - Quote from getUberQuote()
  */
 async function savePendingRide(phone, quote) {
   await initTable();
 
   const queryStart = Date.now();
-  await sql`
+  await pool.query(`
     INSERT INTO pending_uber_rides (
       phone, pickup_address, destination_address,
       pickup_lat, pickup_lng, dest_lat, dest_lng,
       product_id, product_name, price_estimate
     )
-    VALUES (
-      ${phone}, ${quote.pickup.address}, ${quote.destination.address},
-      ${quote.pickup.lat}, ${quote.pickup.lng},
-      ${quote.destination.lat}, ${quote.destination.lng},
-      ${quote.productId}, ${quote.productName}, ${quote.priceEstimate}
-    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     ON CONFLICT (phone)
     DO UPDATE SET
-      pickup_address = ${quote.pickup.address},
-      destination_address = ${quote.destination.address},
-      pickup_lat = ${quote.pickup.lat},
-      pickup_lng = ${quote.pickup.lng},
-      dest_lat = ${quote.destination.lat},
-      dest_lng = ${quote.destination.lng},
-      product_id = ${quote.productId},
-      product_name = ${quote.productName},
-      price_estimate = ${quote.priceEstimate},
+      pickup_address = $2,
+      destination_address = $3,
+      pickup_lat = $4,
+      pickup_lng = $5,
+      dest_lat = $6,
+      dest_lng = $7,
+      product_id = $8,
+      product_name = $9,
+      price_estimate = $10,
       created_at = NOW()
-  `;
+  `, [
+    phone,
+    quote.pickup.address,
+    quote.destination.address,
+    quote.pickup.lat,
+    quote.pickup.lng,
+    quote.destination.lat,
+    quote.destination.lng,
+    quote.productId,
+    quote.productName,
+    quote.priceEstimate
+  ]);
   console.log(`[TIMING] uber-db-savePending: ${Date.now() - queryStart}ms`);
 }
 
@@ -79,11 +91,11 @@ async function getPendingRide(phone) {
   await initTable();
 
   const queryStart = Date.now();
-  const { rows } = await sql`
+  const { rows } = await pool.query(`
     SELECT * FROM pending_uber_rides
-    WHERE phone = ${phone}
+    WHERE phone = $1
     AND created_at > NOW() - INTERVAL '10 minutes'
-  `;
+  `, [phone]);
   console.log(`[TIMING] uber-db-getPending: ${Date.now() - queryStart}ms`);
 
   if (!rows[0]) return null;
@@ -114,7 +126,7 @@ async function clearPendingRide(phone) {
   await initTable();
 
   const queryStart = Date.now();
-  await sql`DELETE FROM pending_uber_rides WHERE phone = ${phone}`;
+  await pool.query('DELETE FROM pending_uber_rides WHERE phone = $1', [phone]);
   console.log(`[TIMING] uber-db-clearPending: ${Date.now() - queryStart}ms`);
 }
 
@@ -127,12 +139,12 @@ async function saveActiveRide(phone, requestId) {
   await initTable();
 
   const queryStart = Date.now();
-  await sql`
+  await pool.query(`
     INSERT INTO active_uber_rides (phone, request_id)
-    VALUES (${phone}, ${requestId})
+    VALUES ($1, $2)
     ON CONFLICT (phone)
-    DO UPDATE SET request_id = ${requestId}, created_at = NOW()
-  `;
+    DO UPDATE SET request_id = $2, created_at = NOW()
+  `, [phone, requestId]);
   console.log(`[TIMING] uber-db-saveActive: ${Date.now() - queryStart}ms`);
 }
 
@@ -145,9 +157,10 @@ async function getActiveRide(phone) {
   await initTable();
 
   const queryStart = Date.now();
-  const { rows } = await sql`
-    SELECT request_id FROM active_uber_rides WHERE phone = ${phone}
-  `;
+  const { rows } = await pool.query(
+    'SELECT request_id FROM active_uber_rides WHERE phone = $1',
+    [phone]
+  );
   console.log(`[TIMING] uber-db-getActive: ${Date.now() - queryStart}ms`);
 
   return rows[0]?.request_id || null;
@@ -161,7 +174,7 @@ async function clearActiveRide(phone) {
   await initTable();
 
   const queryStart = Date.now();
-  await sql`DELETE FROM active_uber_rides WHERE phone = ${phone}`;
+  await pool.query('DELETE FROM active_uber_rides WHERE phone = $1', [phone]);
   console.log(`[TIMING] uber-db-clearActive: ${Date.now() - queryStart}ms`);
 }
 
@@ -172,10 +185,10 @@ async function cleanupExpiredRides() {
   await initTable();
 
   const queryStart = Date.now();
-  const result = await sql`
+  const result = await pool.query(`
     DELETE FROM pending_uber_rides
     WHERE created_at < NOW() - INTERVAL '10 minutes'
-  `;
+  `);
   console.log(`[TIMING] uber-db-cleanup: ${Date.now() - queryStart}ms (${result.rowCount || 0} removed)`);
 }
 
