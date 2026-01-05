@@ -5,6 +5,9 @@ WORKDIR /app
 # Install the Playwright MCP server
 RUN npm install @playwright/mcp
 
+# Pre-install Chromium to avoid 12s delay on first request
+RUN npx playwright install chromium
+
 # Default port (Railway will override with PORT env var)
 ENV PORT=3666
 
