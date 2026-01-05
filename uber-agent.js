@@ -1,55 +1,21 @@
-const { chromium } = require('playwright');
+const Anthropic = require('@anthropic-ai/sdk');
 
-// Path to store browser session (cookies, localStorage)
-const SESSION_FILE = '/tmp/uber-session.json';
+const anthropic = new Anthropic();
+const MCP_BASE_URL = process.env.PLAYWRIGHT_MCP_URL || 'http://localhost:3666';
 
-/**
- * Get a browser context with saved session (if available)
- */
-async function getBrowserContext(browser) {
-  const fs = require('fs');
-
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 720 },
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
-    geolocation: { latitude: 40.7580, longitude: -73.9855 }, // Times Square
-    permissions: ['geolocation'],
-    javaScriptEnabled: true
-  });
-
-  // Try to load saved session
-  try {
-    if (fs.existsSync(SESSION_FILE)) {
-      const sessionData = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
-      await context.addCookies(sessionData.cookies || []);
-      console.log('[UBER] Loaded saved session');
-    }
-  } catch (err) {
-    console.log('[UBER] No saved session found, starting fresh');
-  }
-
-  return context;
-}
-
-/**
- * Save browser session for reuse
- */
-async function saveSession(context) {
-  const fs = require('fs');
-
-  try {
-    const cookies = await context.cookies();
-    fs.writeFileSync(SESSION_FILE, JSON.stringify({ cookies }));
-    console.log('[UBER] Session saved');
-  } catch (err) {
-    console.error('[UBER] Failed to save session:', err.message);
+// MCP SDK is ESM-only, use dynamic imports
+let Client, SSEClientTransport;
+async function loadMcpSdk() {
+  if (!Client) {
+    const clientModule = await import('@modelcontextprotocol/sdk/client');
+    const sseModule = await import('@modelcontextprotocol/sdk/client/sse.js');
+    Client = clientModule.Client;
+    SSEClientTransport = sseModule.SSEClientTransport;
   }
 }
 
 /**
- * Get Uber quote by automating the web interface
+ * Get Uber quote using Claude as the browser automation agent
  * @param {string} pickup - Pickup address
  * @param {string} destination - Destination address
  * @returns {Promise<Object>} Quote with price, ETA, addresses
@@ -58,169 +24,164 @@ async function getUberQuote(pickup, destination) {
   console.log(`[UBER] Getting quote: ${pickup} -> ${destination}`);
   const startTime = Date.now();
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled'
-    ]
-  });
+  // Load MCP SDK (ESM dynamic import)
+  await loadMcpSdk();
+
+  // Connect to Playwright MCP server via SSE transport
+  const transport = new SSEClientTransport(new URL('/sse', MCP_BASE_URL));
+  const mcpClient = new Client({ name: 'uber-agent', version: '1.0.0' });
 
   try {
-    const context = await getBrowserContext(browser);
-    const page = await context.newPage();
+    await mcpClient.connect(transport);
+    console.log(`[UBER] Connected to MCP server at ${MCP_BASE_URL}`);
 
-    // Navigate to Uber's mobile web page (more reliable than desktop)
-    await page.goto('https://m.uber.com/go/home', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
-    await page.waitForTimeout(3000);
-    console.log(`[UBER] Page loaded in ${Date.now() - startTime}ms`);
+    // Get available tools from MCP server
+    const { tools } = await mcpClient.listTools();
+    console.log(`[UBER] MCP tools available: ${tools.map(t => t.name).join(', ')}`);
 
-    // Dismiss cookie banner if present
-    try {
-      const gotItButton = await page.$('button:has-text("Got it")');
-      if (gotItButton) await gotItButton.click();
-    } catch (e) { /* ignore */ }
+    // Convert MCP tools to Claude API format
+    const claudeTools = tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema
+    }));
 
-    // Click on pickup location field
-    const pickupField = await page.waitForSelector('text=Pickup location', { timeout: 10000 });
-    await pickupField.click();
-    await page.waitForTimeout(500);
+    const systemPrompt = `You are a browser automation agent. You have access to tools that let you control a web browser.
+Use the browser tools to navigate Uber's website and get a price quote.
+Be patient - wait for elements to load before interacting with them.
+If you see a cookie banner or popup, dismiss it first.`;
 
-    // Type pickup address
-    await page.keyboard.type(pickup, { delay: 30 });
-    await page.waitForTimeout(2000);
+    const messages = [{
+      role: 'user',
+      content: `Get an Uber price quote from "${pickup}" to "${destination}".
 
-    // Select first suggestion using keyboard
-    await page.keyboard.press('ArrowDown');
-    await page.waitForTimeout(300);
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(2000);
+Steps:
+1. Navigate to https://m.uber.com/go/home
+2. Wait for the page to fully load
+3. If there's a cookie banner or popup, dismiss it
+4. Click the pickup location field and type: ${pickup}
+5. Wait for location suggestions to appear
+6. Select the first suggestion
+7. Click the dropoff/destination field and type: ${destination}
+8. Wait for location suggestions to appear
+9. Select the first suggestion
+10. Click the "Search" or "See prices" button
+11. Wait for ride options to load
+12. Extract all visible information: prices, ETAs, ride types, addresses
 
-    // Now click on dropoff field
-    const dropoffField = await page.waitForSelector('text=Dropoff location', { timeout: 10000 });
-    await dropoffField.click();
-    await page.waitForTimeout(500);
+When you have extracted the information, respond with ONLY this JSON format (no other text before or after):
+{
+  "price": "$XX-XX or null if login required",
+  "eta": "X min or null",
+  "products": ["UberX", "Comfort", ...],
+  "pickupAddress": "resolved address from page",
+  "destAddress": "resolved address from page",
+  "requiresLogin": true or false
+}`
+    }];
 
-    // Type destination
-    await page.keyboard.type(destination, { delay: 30 });
-    await page.waitForTimeout(2000);
+    // Agent loop - let Claude drive the browser
+    let maxIterations = 25;
+    while (maxIterations-- > 0) {
+      console.log(`[UBER] Iteration ${25 - maxIterations}...`);
 
-    // Select first suggestion
-    await page.keyboard.press('ArrowDown');
-    await page.waitForTimeout(300);
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(5000);
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: systemPrompt,
+        tools: claudeTools,
+        messages
+      });
 
-    // Click "Search" button to trigger price lookup
-    const searchBtn = await page.$('button:has-text("Search")');
-    if (searchBtn) {
-      await searchBtn.click();
-      await page.waitForTimeout(6000);
-    }
+      console.log(`[UBER] Response stop_reason: ${response.stop_reason}`);
 
-    // Extract ride options and check if login is required
-    const quoteData = await page.evaluate(() => {
-      const body = document.body.innerText;
+      // Check if Claude is done (returned final text without tool use)
+      if (response.stop_reason === 'end_turn') {
+        const textBlock = response.content.find(c => c.type === 'text');
+        if (textBlock?.text) {
+          const jsonMatch = textBlock.text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const result = JSON.parse(jsonMatch[0]);
+            console.log(`[UBER] Quote fetched in ${Date.now() - startTime}ms`);
+            console.log(`[UBER] Result: ${JSON.stringify(result)}`);
 
-      // Check if login is required
-      const requiresLogin = body.includes('Log in to see ride options') ||
-                           body.includes('log in or sign up');
+            // Format response to match existing interface
+            return {
+              productId: 'uberx',
+              productName: result.products?.[0] || 'UberX',
+              priceEstimate: result.price || 'Price unavailable',
+              eta: result.eta || '5-10 min',
+              availableProducts: result.products || [],
+              requiresLogin: result.requiresLogin || false,
+              pickup: {
+                address: result.pickupAddress || pickup,
+                lat: 0,
+                lng: 0
+              },
+              destination: {
+                address: result.destAddress || destination,
+                lat: 0,
+                lng: 0
+              }
+            };
+          }
+        }
+        // No JSON found, Claude might be confused
+        console.log(`[UBER] No JSON in response: ${textBlock?.text}`);
+        break;
+      }
 
-      // Extract price (look for $XX or $XX-$YY patterns)
-      const priceMatch = body.match(/\$\d+(?:\.\d{2})?(?:\s*[-–]\s*\$\d+(?:\.\d{2})?)?/);
-      const price = priceMatch ? priceMatch[0] : null;
+      // Execute any tool calls
+      const toolUseBlocks = response.content.filter(c => c.type === 'tool_use');
+      if (toolUseBlocks.length === 0) {
+        console.log('[UBER] No tool calls in response, breaking');
+        break;
+      }
 
-      // Look for ETA (X min away or X-Y min)
-      const etaMatch = body.match(/(\d+(?:\s*[-–]\s*\d+)?)\s*min/i);
-      const eta = etaMatch ? etaMatch[0] : null;
-
-      // Get available products
-      const products = [];
-      const productPatterns = ['UberX', 'UberXL', 'Black', 'Comfort', 'Electric', 'Pool', 'UberXXL'];
-      for (const p of productPatterns) {
-        if (body.includes(p) && !products.includes(p)) {
-          products.push(p);
+      const toolResults = [];
+      for (const block of toolUseBlocks) {
+        console.log(`[UBER] Calling tool: ${block.name}`);
+        try {
+          const result = await mcpClient.callTool({ name: block.name, arguments: block.input });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(result.content)
+          });
+        } catch (err) {
+          console.error(`[UBER] Tool error: ${err.message}`);
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify({ error: err.message }),
+            is_error: true
+          });
         }
       }
 
-      // Get pickup and dropoff from page
-      const fromMatch = body.match(/From ([^\n]+)/);
-      const toMatch = body.match(/To ([^\n]+)/);
-
-      return {
-        price,
-        eta,
-        products,
-        requiresLogin,
-        pickupAddress: fromMatch ? fromMatch[1].trim() : null,
-        destAddress: toMatch ? toMatch[1].trim() : null
-      };
-    });
-
-    await saveSession(context);
-    console.log(`[UBER] Quote fetched in ${Date.now() - startTime}ms`);
-    console.log(`[UBER] Data: ${JSON.stringify(quoteData)}`);
-
-    // If login required but we have ride options, still return useful info
-    if (quoteData.requiresLogin && !quoteData.price) {
-      return {
-        productId: 'uberx',
-        productName: quoteData.products.length > 0 ? quoteData.products[0] : 'UberX',
-        priceEstimate: 'Login required for price',
-        eta: quoteData.eta || 'varies',
-        availableProducts: quoteData.products,
-        requiresLogin: true,
-        pickup: {
-          address: quoteData.pickupAddress || pickup,
-          lat: 0,
-          lng: 0
-        },
-        destination: {
-          address: quoteData.destAddress || destination,
-          lat: 0,
-          lng: 0
-        }
-      };
+      // Add assistant response and tool results to messages
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({ role: 'user', content: toolResults });
     }
 
-    return {
-      productId: 'uberx',
-      productName: quoteData.products.length > 0 ? quoteData.products[0] : 'UberX',
-      priceEstimate: quoteData.price || 'Price unavailable',
-      eta: quoteData.eta || '5-10 min',
-      pickup: {
-        address: quoteData.pickupAddress || pickup,
-        lat: 0,
-        lng: 0
-      },
-      destination: {
-        address: quoteData.destAddress || destination,
-        lat: 0,
-        lng: 0
-      }
-    };
-
+    throw new Error('Max iterations reached without getting a quote');
   } finally {
-    await browser.close();
+    try {
+      await mcpClient.close();
+    } catch (e) {
+      // Ignore close errors
+    }
   }
 }
 
 /**
  * Confirm and book an Uber ride
  * NOTE: This requires the user to be logged in. For now, returns a placeholder.
- * Real implementation would need to handle Uber login flow.
  * @param {Object} pendingRide - Saved ride details from getUberQuote
  * @returns {Promise<Object>} Ride confirmation details
  */
 async function confirmUberRide(pendingRide) {
   console.log(`[UBER] Confirming ride to ${pendingRide.destination.address}`);
-
-  // For now, we can't actually book without login
-  // Return an error explaining the situation
   throw new Error('Uber booking requires login. Feature coming soon. Please book directly in Uber app.');
 }
 
@@ -231,8 +192,6 @@ async function confirmUberRide(pendingRide) {
  */
 async function getUberStatus(requestId) {
   console.log(`[UBER] Getting status for ride ${requestId}`);
-
-  // Without API access, we can't get real-time status
   throw new Error('Uber status requires app login. Check your Uber app for updates.');
 }
 
@@ -242,8 +201,6 @@ async function getUberStatus(requestId) {
  */
 async function cancelUberRide(requestId) {
   console.log(`[UBER] Canceling ride ${requestId}`);
-
-  // Without API access, we can't cancel
   throw new Error('Uber cancellation requires app login. Cancel in your Uber app.');
 }
 
