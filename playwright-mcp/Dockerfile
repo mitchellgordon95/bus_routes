@@ -15,5 +15,6 @@ ENV PORT=3666
 # --browser chromium: use Chromium (not Chrome which may not be installed)
 # --no-sandbox: required when running as root in Docker
 # --isolated: allows multiple browser instances
+# --geolocation: set to NYC (Times Square) for location-based searches
 # Using shell form so $PORT gets expanded
-CMD npx @playwright/mcp --port $PORT --host 0.0.0.0 --allowed-hosts "*" --browser chromium --headless --no-sandbox --isolated
+CMD npx @playwright/mcp --port $PORT --host 0.0.0.0 --allowed-hosts "*" --browser chromium --headless --no-sandbox --isolated --geolocation "40.7580,-73.9855"
