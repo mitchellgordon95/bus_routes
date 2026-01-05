@@ -9,6 +9,8 @@ RUN npm install @playwright/mcp
 ENV PORT=3666
 
 # Run with HTTP transport, bind to all interfaces, allow internal network connections
-# --isolated: allows multiple browser instances (avoids "browser in use" conflicts)
+# --browser chromium: use Chromium (not Chrome which may not be installed)
+# --no-sandbox: required when running as root in Docker
+# --isolated: allows multiple browser instances
 # Using shell form so $PORT gets expanded
-CMD npx @playwright/mcp --port $PORT --host 0.0.0.0 --allowed-hosts "*" --headless --isolated
+CMD npx @playwright/mcp --port $PORT --host 0.0.0.0 --allowed-hosts "*" --browser chromium --headless --no-sandbox --isolated
