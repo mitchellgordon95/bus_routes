@@ -22,16 +22,38 @@ async function loadMcpSdk() {
  */
 async function getUberQuote(pickup, destination) {
   console.log(`[UBER] Getting quote: ${pickup} -> ${destination}`);
+  console.log(`[UBER] MCP_BASE_URL: ${MCP_BASE_URL}`);
   const startTime = Date.now();
 
   // Load MCP SDK (ESM dynamic import)
   await loadMcpSdk();
 
+  // Build the SSE URL
+  const sseUrl = new URL('/sse', MCP_BASE_URL);
+  console.log(`[UBER] Connecting to SSE endpoint: ${sseUrl.toString()}`);
+
+  // Test connectivity first
+  try {
+    const testUrl = new URL('/sse', MCP_BASE_URL);
+    console.log(`[UBER] Testing connectivity to: ${testUrl.toString()}`);
+    const testResponse = await fetch(testUrl.toString(), { method: 'GET' });
+    console.log(`[UBER] Test response status: ${testResponse.status} ${testResponse.statusText}`);
+    console.log(`[UBER] Test response headers:`, Object.fromEntries(testResponse.headers.entries()));
+  } catch (testErr) {
+    console.error(`[UBER] Connectivity test failed:`, testErr.message);
+  }
+
   // Connect to Playwright MCP server via SSE transport
-  const transport = new SSEClientTransport(new URL('/sse', MCP_BASE_URL));
+  const transport = new SSEClientTransport(sseUrl);
   const mcpClient = new Client({ name: 'uber-agent', version: '1.0.0' });
 
+  // Add error handler for transport
+  transport.onerror = (error) => {
+    console.error(`[UBER] Transport error:`, error);
+  };
+
   try {
+    console.log(`[UBER] Attempting to connect...`);
     await mcpClient.connect(transport);
     console.log(`[UBER] Connected to MCP server at ${MCP_BASE_URL}`);
 
