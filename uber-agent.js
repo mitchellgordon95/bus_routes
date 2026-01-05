@@ -35,6 +35,18 @@ function summarizeArgs(toolName, args) {
 function summarizeResult(toolName, content) {
   if (!content) return 'null';
   const str = typeof content === 'string' ? content : JSON.stringify(content);
+
+  // Check for errors - show full error message
+  if (str.includes('Error:') || str.includes('error":')) {
+    const errorMatch = str.match(/Error:\s*([^\n"]+)/);
+    if (errorMatch) return `ERROR: ${errorMatch[1]}`;
+    // Try to extract error from JSON
+    const jsonErrorMatch = str.match(/"error":\s*"([^"]+)"/);
+    if (jsonErrorMatch) return `ERROR: ${jsonErrorMatch[1]}`;
+    // Show more of the error
+    return str.substring(0, 200) + (str.length > 200 ? '...' : '');
+  }
+
   if (str.length <= 100) return str;
 
   // For snapshots, show element count if available
