@@ -3,6 +3,49 @@ const Anthropic = require('@anthropic-ai/sdk');
 const anthropic = new Anthropic();
 const MCP_BASE_URL = process.env.PLAYWRIGHT_MCP_URL || 'http://localhost:3666';
 
+/**
+ * Summarize tool arguments for logging
+ */
+function summarizeArgs(toolName, args) {
+  if (!args) return '';
+  switch (toolName) {
+    case 'browser_navigate':
+      return `"${args.url}"`;
+    case 'browser_click':
+      return `element="${args.element || args.selector || '?'}"`;
+    case 'browser_type':
+      return `"${(args.text || '').substring(0, 30)}${(args.text || '').length > 30 ? '...' : ''}"`;
+    case 'browser_snapshot':
+      return '';
+    case 'browser_wait_for':
+      return `${args.selector || args.state || '?'}`;
+    case 'browser_fill_form':
+      return `${Object.keys(args.fields || {}).length} fields`;
+    default:
+      const keys = Object.keys(args);
+      if (keys.length === 0) return '';
+      if (keys.length === 1) return `${keys[0]}=${JSON.stringify(args[keys[0]]).substring(0, 30)}`;
+      return `${keys.length} args`;
+  }
+}
+
+/**
+ * Summarize tool result for logging
+ */
+function summarizeResult(toolName, content) {
+  if (!content) return 'null';
+  const str = typeof content === 'string' ? content : JSON.stringify(content);
+  if (str.length <= 100) return str;
+
+  // For snapshots, show element count if available
+  if (toolName === 'browser_snapshot') {
+    const match = str.match(/"type":/g);
+    if (match) return `snapshot (${match.length} elements)`;
+  }
+
+  return str.substring(0, 100) + '...';
+}
+
 // MCP SDK is ESM-only, use dynamic imports
 let Client, StreamableHTTPClientTransport;
 async function loadMcpSdk() {
@@ -22,7 +65,6 @@ async function loadMcpSdk() {
  */
 async function getUberQuote(pickup, destination) {
   console.log(`[UBER] Getting quote: ${pickup} -> ${destination}`);
-  console.log(`[UBER] MCP_BASE_URL: ${MCP_BASE_URL}`);
   const startTime = Date.now();
 
   // Load MCP SDK (ESM dynamic import)
@@ -30,25 +72,18 @@ async function getUberQuote(pickup, destination) {
 
   // Build the MCP URL (not /sse - that's legacy and returns 403)
   const mcpUrl = new URL('/mcp', MCP_BASE_URL);
-  console.log(`[UBER] Connecting to MCP endpoint: ${mcpUrl.toString()}`);
 
   // Connect to Playwright MCP server via Streamable HTTP transport
   const transport = new StreamableHTTPClientTransport(mcpUrl);
   const mcpClient = new Client({ name: 'uber-agent', version: '1.0.0' });
 
-  // Add error handler for transport
-  transport.onerror = (error) => {
-    console.error(`[UBER] Transport error:`, error);
-  };
-
   try {
-    console.log(`[UBER] Attempting to connect...`);
     await mcpClient.connect(transport);
-    console.log(`[UBER] Connected to MCP server at ${MCP_BASE_URL}`);
+    console.log(`[UBER] Connected to MCP server`);
 
     // Get available tools from MCP server
     const { tools } = await mcpClient.listTools();
-    console.log(`[UBER] MCP tools available: ${tools.map(t => t.name).join(', ')}`);
+    console.log(`[UBER] ${tools.length} browser tools available`);
 
     // Convert MCP tools to Claude API format
     const claudeTools = tools.map(t => ({
@@ -94,8 +129,6 @@ When you have extracted the information, respond with ONLY this JSON format (no 
     // Agent loop - let Claude drive the browser
     let maxIterations = 25;
     while (maxIterations-- > 0) {
-      console.log(`[UBER] Iteration ${25 - maxIterations}...`);
-
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4096,
@@ -103,8 +136,6 @@ When you have extracted the information, respond with ONLY this JSON format (no 
         tools: claudeTools,
         messages
       });
-
-      console.log(`[UBER] Response stop_reason: ${response.stop_reason}`);
 
       // Check if Claude is done (returned final text without tool use)
       if (response.stop_reason === 'end_turn') {
@@ -151,16 +182,22 @@ When you have extracted the information, respond with ONLY this JSON format (no 
 
       const toolResults = [];
       for (const block of toolUseBlocks) {
-        console.log(`[UBER] Calling tool: ${block.name}`);
+        // Log tool call with key arguments
+        const argsSummary = summarizeArgs(block.name, block.input);
+        console.log(`[UBER] Tool: ${block.name}(${argsSummary})`);
+
+        const toolStart = Date.now();
         try {
           const result = await mcpClient.callTool({ name: block.name, arguments: block.input });
+          const resultSummary = summarizeResult(block.name, result.content);
+          console.log(`[UBER]   → ${resultSummary} (${Date.now() - toolStart}ms)`);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
             content: JSON.stringify(result.content)
           });
         } catch (err) {
-          console.error(`[UBER] Tool error: ${err.message}`);
+          console.error(`[UBER]   → ERROR: ${err.message} (${Date.now() - toolStart}ms)`);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
