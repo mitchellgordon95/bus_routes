@@ -4,13 +4,13 @@ const anthropic = new Anthropic();
 const MCP_BASE_URL = process.env.PLAYWRIGHT_MCP_URL || 'http://localhost:3666';
 
 // MCP SDK is ESM-only, use dynamic imports
-let Client, SSEClientTransport;
+let Client, StreamableHTTPClientTransport;
 async function loadMcpSdk() {
   if (!Client) {
     const clientModule = await import('@modelcontextprotocol/sdk/client');
-    const sseModule = await import('@modelcontextprotocol/sdk/client/sse.js');
+    const httpModule = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
     Client = clientModule.Client;
-    SSEClientTransport = sseModule.SSEClientTransport;
+    StreamableHTTPClientTransport = httpModule.StreamableHTTPClientTransport;
   }
 }
 
@@ -28,23 +28,12 @@ async function getUberQuote(pickup, destination) {
   // Load MCP SDK (ESM dynamic import)
   await loadMcpSdk();
 
-  // Build the SSE URL
-  const sseUrl = new URL('/sse', MCP_BASE_URL);
-  console.log(`[UBER] Connecting to SSE endpoint: ${sseUrl.toString()}`);
+  // Build the MCP URL (not /sse - that's legacy and returns 403)
+  const mcpUrl = new URL('/mcp', MCP_BASE_URL);
+  console.log(`[UBER] Connecting to MCP endpoint: ${mcpUrl.toString()}`);
 
-  // Test connectivity first
-  try {
-    const testUrl = new URL('/sse', MCP_BASE_URL);
-    console.log(`[UBER] Testing connectivity to: ${testUrl.toString()}`);
-    const testResponse = await fetch(testUrl.toString(), { method: 'GET' });
-    console.log(`[UBER] Test response status: ${testResponse.status} ${testResponse.statusText}`);
-    console.log(`[UBER] Test response headers:`, Object.fromEntries(testResponse.headers.entries()));
-  } catch (testErr) {
-    console.error(`[UBER] Connectivity test failed:`, testErr.message);
-  }
-
-  // Connect to Playwright MCP server via SSE transport
-  const transport = new SSEClientTransport(sseUrl);
+  // Connect to Playwright MCP server via Streamable HTTP transport
+  const transport = new StreamableHTTPClientTransport(mcpUrl);
   const mcpClient = new Client({ name: 'uber-agent', version: '1.0.0' });
 
   // Add error handler for transport
