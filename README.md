@@ -1,220 +1,151 @@
-# NYC Bus SMS Service
+# TextPal
 
-A simple SMS-based service to get real-time NYC MTA bus arrival times, recreating the functionality of the now-defunct 511123 service.
+An SMS-based personal assistant that handles everyday tasks through AI agents and API integrations. Text it to check bus times, track calories, or get Uber quotes.
 
 ## Features
 
-- Text a bus stop code to get real-time arrival information
-- Filter by specific route (e.g., "308209 B63")
-- Refresh recent queries with "R"
-- Shows stops away and estimated arrival times
-- Works with all NYC MTA buses
+### Bus Arrival Times
+Real-time NYC MTA bus arrivals via the BusTime API.
+```
+308209        → All buses at stop 308209
+308209 B63    → Only B63 buses at that stop
+R             → Refresh last query
+```
 
-## Quick Start
+### Calorie Tracking
+AI-powered food logging using Google Gemini for natural language and image understanding.
+```
+2 eggs and toast     → Logs ~250 cal
+[send photo]         → Estimates calories from image
+total                → Today's total vs target
+sub 50               → Subtract 50 calories
+target 2000          → Set daily goal
+suggest 300 sweet    → Get food ideas for 300 cal
+reset calories       → Start fresh
+```
 
-### 🚀 Deploy to Vercel (Recommended - 5 minutes)
+### Uber Quotes
+Get ride estimates using Claude as a browser automation agent.
+```
+uber times square to jfk    → Get price quote and ride options
+uber confirm                → Book the ride (coming soon)
+uber status                 → Check ride status
+uber cancel                 → Cancel ride
+```
 
-The easiest way to get started! See **[VERCEL_DEPLOY.md](VERCEL_DEPLOY.md)** for complete instructions.
+## Architecture
 
-**TL;DR:**
-1. Get your MTA API key and Twilio credentials
-2. Push this repo to GitHub
-3. Import to Vercel and add environment variables
-4. Configure Twilio webhook with your Vercel URL
-5. Done!
+```
+┌─────────────────┐     ┌──────────────────────────────────────────┐
+│     Twilio      │     │              Railway                      │
+│  (SMS Gateway)  │────▶│  ┌─────────────────────────────────────┐ │
+└─────────────────┘     │  │         Express Server              │ │
+                        │  │  • Message routing                  │ │
+                        │  │  • MTA API integration              │ │
+                        │  │  • Gemini AI (calories)             │ │
+                        │  │  • Claude AI (Uber agent)           │ │
+                        │  └──────────────┬──────────────────────┘ │
+                        │                 │                        │
+                        │  ┌──────────────▼──────────────────────┐ │
+                        │  │     Playwright MCP Server           │ │
+                        │  │  • Headless Chromium                │ │
+                        │  │  • Browser automation tools         │ │
+                        │  └─────────────────────────────────────┘ │
+                        │                                          │
+                        │  ┌─────────────────────────────────────┐ │
+                        │  │           PostgreSQL                │ │
+                        │  │  • Calorie logs                     │ │
+                        │  │  • Pending Uber rides               │ │
+                        │  └─────────────────────────────────────┘ │
+                        └──────────────────────────────────────────┘
+```
 
-### 🛠 Local Development
+### How AI Agents Work
 
-#### 1. Get API Keys
+**Calorie Tracking**: Uses Google Gemini to parse natural language food descriptions and analyze food photos, returning structured calorie estimates.
 
-**MTA Bus Time API Key (Free)**
-- Go to https://register.developer.obanyc.com/
-- Fill out the registration form
-- You'll receive an API key via email within 30 minutes
+**Uber Quotes**: Uses Claude with the Playwright MCP server for browser automation. Claude receives a task ("get Uber quote from A to B") and uses browser tools (`browser_navigate`, `browser_click`, `browser_type`, etc.) to complete it. This approach is resilient to UI changes since Claude interprets the page rather than relying on hardcoded selectors.
 
-**Twilio Account (Free tier available)**
-- Sign up at https://www.twilio.com/try-twilio
-- Get a phone number (free trial includes one)
-- Note your Account SID and Auth Token from the console
+## Setup
 
-#### 2. Install Dependencies
+### Prerequisites
+- Node.js 20+
+- PostgreSQL database
+- API keys: Twilio, MTA BusTime, Google Gemini, Anthropic
+
+### Environment Variables
+
+```bash
+cp .env.example .env.local
+```
+
+```
+# Twilio
+TWILIO_ACCOUNT_SID=your_sid
+TWILIO_AUTH_TOKEN=your_token
+
+# MTA BusTime API
+MTA_API_KEY=your_key
+
+# Google Gemini (calorie estimation)
+GEMINI_API_KEY=your_key
+
+# Anthropic (Uber agent)
+ANTHROPIC_API_KEY=your_key
+
+# PostgreSQL
+DATABASE_URL=postgresql://user:pass@host:port/db
+
+# Playwright MCP Server (for Uber)
+PLAYWRIGHT_MCP_URL=http://localhost:3666
+```
+
+### Local Development
 
 ```bash
 npm install
-```
-
-#### 3. Configure Environment Variables
-
-Copy the example file and fill in your credentials:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your keys:
-```
-MTA_API_KEY=your_actual_mta_api_key
-TWILIO_ACCOUNT_SID=your_actual_account_sid
-TWILIO_AUTH_TOKEN=your_actual_auth_token
-DATABASE_URL=postgresql://user:password@host:port/database
-```
-
-#### 4. Test Locally
-
-Run the server:
-```bash
-npm start
-```
-
-For development with auto-reload:
-```bash
 npm run dev
 ```
 
-### 5. Test the MTA API
-
-You can test the MTA API connection:
+For Uber functionality, run the Playwright MCP server:
 ```bash
-node test-mta.js
+npx @playwright/mcp --port 3666 --browser chromium --headless --no-sandbox
 ```
 
-### 6. Expose Local Server (for testing)
+### Deploy to Railway
 
-Use ngrok to expose your local server to receive Twilio webhooks:
-
-```bash
-# Install ngrok: https://ngrok.com/download
-ngrok http 3000
-```
-
-Copy the HTTPS URL (e.g., `https://abc123.ngrok.io`)
-
-### 7. Configure Twilio Webhook
-
-1. Go to https://console.twilio.com/
-2. Navigate to Phone Numbers → Manage → Active numbers
-3. Click your phone number
-4. Under "Messaging Configuration"
-5. Set "A MESSAGE COMES IN" webhook to: `https://your-ngrok-url.ngrok.io/sms`
-6. Set HTTP method to `POST`
-7. Save
-
-## Usage
-
-Once deployed, text your Twilio number:
-
-### Basic Query
-```
-308209
-```
-Returns all buses arriving at stop 308209
-
-### Filtered by Route
-```
-308209 B63
-```
-Returns only B63 buses at stop 308209
-
-### Refresh
-```
-R
-```
-Refreshes your last query (within 20 minutes)
-
-## Finding Bus Stop Codes
-
-1. Visit https://bustime.mta.info/
-2. Search for your stop or route
-3. The 6-digit code is displayed at each stop
-4. Or look for the code printed on the physical bus stop sign
-
-## Deployment Options
-
-### ⭐ Vercel (Recommended)
-**Best for:** Serverless, zero config, free tier
-**Guide:** See [VERCEL_DEPLOY.md](VERCEL_DEPLOY.md)
-
-- Push to GitHub → Import to Vercel → Done
-- Automatic HTTPS and global CDN
-- Free tier handles millions of requests/month
-
-### Railway.app
-**Best for:** Traditional server deployment
-
-1. Push code to GitHub
-2. Connect Railway to your repo
-3. Add environment variables in Railway dashboard
-4. Railway provides a public URL automatically
-
-### Heroku
-**Best for:** Familiar platform
-
-```bash
-heroku create your-app-name
-heroku config:set MTA_API_KEY=your_key
-heroku config:set TWILIO_ACCOUNT_SID=your_sid
-heroku config:set TWILIO_AUTH_TOKEN=your_token
-git push heroku main
-```
-
-### Other Options
-DigitalOcean, AWS, Google Cloud, etc. - Deploy as a standard Node.js app.
+1. Create a new Railway project
+2. Add PostgreSQL service
+3. Add Express server from this repo (root directory)
+4. Add Playwright MCP service from `playwright-mcp/` subdirectory
+5. Configure environment variables
+6. Set Twilio webhook to `https://your-app.railway.app/sms`
 
 ## Project Structure
 
 ```
 .
-├── api/
-│   └── sms.js              # Vercel serverless function (webhook)
-├── public/
-│   └── index.html          # Landing page
-├── server.js               # Express server (for local dev)
-├── mta-api.js             # MTA Bus Time API client
-├── message-handler.js     # SMS message parser & session manager
-├── test-mta.js            # Test script for MTA API
-├── vercel.json            # Vercel configuration
-├── package.json           # Dependencies
-├── .env.example           # Environment variables template
-├── README.md              # This file
-├── VERCEL_DEPLOY.md       # Vercel deployment guide
-└── QUICKSTART.md          # Quick setup guide
+├── server.js              # Express server & request handling
+├── message-handler.js     # SMS command parsing & routing
+├── mta-api.js             # MTA BusTime API client
+├── gemini-api.js          # Google Gemini integration
+├── calorie-tracker.js     # Calorie database operations
+├── uber-agent.js          # Claude + MCP browser automation
+├── uber-pending.js        # Uber ride state management
+├── playwright-mcp/        # Playwright MCP Docker service
+│   └── Dockerfile
+└── Dockerfile             # Main Express server
 ```
 
 ## Cost Estimate
 
-- **MTA API**: Free
-- **Twilio SMS**: ~$0.0079 per message (sent + received)
-  - 100 messages = ~$0.79
-  - 1000 messages = ~$7.90
-- **Hosting**:
-  - **Vercel**: Free tier (up to 100GB bandwidth & millions of requests/month)
-  - Railway/Heroku free tier: $0
-  - Or as low as $5/month for paid hosting
-
-**Total cost for personal use: ~$1-5/month** (just Twilio SMS fees)
-
-## Limitations
-
-- Requires valid 6-digit MTA stop codes
-- Intersection search not yet implemented
-- Service changes ("C" command) not yet implemented
-- Session data stored in memory (resets on server restart)
-
-## Future Enhancements
-
-- [ ] Add intersection-based search
-- [ ] Implement service alerts/changes
-- [ ] Persistent session storage (Redis)
-- [ ] Support for subway arrivals
-- [ ] Rate limiting per phone number
-
-## Troubleshooting
-
-**"No buses found"**: Verify the stop code at https://bustime.mta.info/
-
-**No SMS received**: Check Twilio webhook configuration and server logs
-
-**API errors**: Verify your MTA API key is valid
+| Service | Cost |
+|---------|------|
+| Twilio SMS | ~$0.0079/message |
+| MTA API | Free |
+| Gemini API | Free tier available |
+| Anthropic API | ~$0.003/1K input tokens |
+| Railway | ~$5/month |
 
 ## License
 
