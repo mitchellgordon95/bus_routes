@@ -23,6 +23,24 @@ const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
+// Initialize Twilio client for sending async SMS responses
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+/**
+ * Send SMS asynchronously (for long-running operations that exceed webhook timeout)
+ */
+async function sendAsyncSMS(to, from, body) {
+  try {
+    await twilioClient.messages.create({ body, to, from });
+    console.log(`[ASYNC SMS] Sent to ${to}`);
+  } catch (error) {
+    console.error('[ASYNC SMS] Failed:', error.message);
+  }
+}
+
 /**
  * Fetch image from Twilio MMS URL
  */
@@ -159,57 +177,81 @@ app.post('/sms', async (req, res) => {
         break;
 
       case 'uber_quote': {
-        try {
+        const twilioNumber = req.body.To;
+
+        // Send immediate acknowledgment (avoids Twilio 15s timeout)
+        twiml.message('Getting Uber quote... (this may take a moment)');
+
+        // Run async - don't await
+        (async () => {
           const uberStart = Date.now();
-          const quote = await getUberQuote(parsed.pickup, parsed.destination);
-          console.log(`[TIMING] uber-quote-total: ${Date.now() - uberStart}ms`);
+          try {
+            const quote = await getUberQuote(parsed.pickup, parsed.destination);
+            console.log(`[TIMING] uber-quote-total: ${Date.now() - uberStart}ms`);
 
-          // Save pending ride for confirmation
-          await savePendingRide(fromNumber, quote);
+            await savePendingRide(fromNumber, quote);
 
-          if (quote.requiresLogin) {
-            // Login required - show available products but note price unavailable
-            const products = quote.availableProducts?.slice(0, 4).join(', ') || 'UberX';
-            responseText = `Uber available: ${products}\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nPrices require Uber login. Open Uber app to book.`;
-          } else {
-            responseText = `${quote.productName}: ${quote.priceEstimate}, ${quote.eta} pickup\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nReply "uber confirm" to book.`;
+            let msg;
+            if (quote.requiresLogin) {
+              const products = quote.availableProducts?.slice(0, 4).join(', ') || 'UberX';
+              msg = `Uber available: ${products}\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nPrices require Uber login. Open Uber app to book.`;
+            } else {
+              msg = `${quote.productName}: ${quote.priceEstimate}, ${quote.eta} pickup\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nReply "uber confirm" to book.`;
+            }
+
+            await sendAsyncSMS(fromNumber, twilioNumber, msg);
+          } catch (error) {
+            console.error('Uber quote error:', error.message);
+            await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not get Uber quote. Check your addresses.');
           }
-        } catch (error) {
-          console.error('Uber quote error:', error.message);
-          responseText = error.message || 'Could not get Uber quote. Check your addresses.';
-        }
-        break;
+        })();
+
+        // Return immediately - response will be sent via async SMS
+        res.setHeader('Content-Type', 'text/xml');
+        res.status(200).send(twiml.toString());
+        return;
       }
 
       case 'uber_confirm': {
-        // Get pending ride
+        // Get pending ride (fast DB lookup)
         const pendingRide = await getPendingRide(fromNumber);
         if (!pendingRide) {
           responseText = 'No pending Uber ride. Text "uber [pickup] to [destination]" first.';
           break;
         }
 
-        try {
+        const twilioNumber = req.body.To;
+
+        // Send immediate acknowledgment
+        twiml.message('Booking your Uber... (this may take a moment)');
+
+        // Run async - don't await
+        (async () => {
           const uberStart = Date.now();
-          const ride = await confirmUberRide(pendingRide);
-          console.log(`[TIMING] uber-confirm-total: ${Date.now() - uberStart}ms`);
+          try {
+            const ride = await confirmUberRide(pendingRide);
+            console.log(`[TIMING] uber-confirm-total: ${Date.now() - uberStart}ms`);
 
-          // Save active ride and clear pending
-          await saveActiveRide(fromNumber, ride.requestId);
-          await clearPendingRide(fromNumber);
+            await saveActiveRide(fromNumber, ride.requestId);
+            await clearPendingRide(fromNumber);
 
-          responseText = `Uber booked!\n\nDriver: ${ride.driverName}\nVehicle: ${ride.vehicle}\nETA: ${ride.eta}\n\nText "uber status" for updates.`;
-        } catch (error) {
-          console.error('Uber confirm error:', error.message);
-          responseText = error.message || 'Could not book Uber. Try again.';
-        }
-        break;
+            await sendAsyncSMS(fromNumber, twilioNumber,
+              `Uber booked!\n\nDriver: ${ride.driverName}\nVehicle: ${ride.vehicle}\nETA: ${ride.eta}\n\nText "uber status" for updates.`);
+          } catch (error) {
+            console.error('Uber confirm error:', error.message);
+            await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not book Uber. Try again.');
+          }
+        })();
+
+        res.setHeader('Content-Type', 'text/xml');
+        res.status(200).send(twiml.toString());
+        return;
       }
 
       case 'uber_status': {
         const activeRequestId = await getActiveRide(fromNumber);
         if (!activeRequestId) {
-          // Check for pending ride
+          // Check for pending ride (fast DB lookup - respond synchronously)
           const pending = await getPendingRide(fromNumber);
           if (pending) {
             responseText = `Pending: ${pending.productName} ${pending.priceEstimate}\nFrom: ${pending.pickup.address}\nTo: ${pending.destination.address}\n\nReply "uber confirm" to book.`;
@@ -219,37 +261,60 @@ app.post('/sms', async (req, res) => {
           break;
         }
 
-        try {
-          const status = await getUberStatus(activeRequestId);
-          responseText = `Uber Status: ${status.status}\n\nDriver: ${status.driverName || 'Assigned'}\nETA: ${status.eta || 'Calculating...'}`;
+        const twilioNumber = req.body.To;
 
-          // Clear if ride is completed or canceled
-          if (['completed', 'rider_canceled', 'driver_canceled'].includes(status.status)) {
-            await clearActiveRide(fromNumber);
+        // Send immediate acknowledgment
+        twiml.message('Checking ride status...');
+
+        // Run async - don't await (getUberStatus uses browser automation)
+        (async () => {
+          try {
+            const status = await getUberStatus(activeRequestId);
+            const msg = `Uber Status: ${status.status}\n\nDriver: ${status.driverName || 'Assigned'}\nETA: ${status.eta || 'Calculating...'}`;
+
+            if (['completed', 'rider_canceled', 'driver_canceled'].includes(status.status)) {
+              await clearActiveRide(fromNumber);
+            }
+
+            await sendAsyncSMS(fromNumber, twilioNumber, msg);
+          } catch (error) {
+            console.error('Uber status error:', error.message);
+            await sendAsyncSMS(fromNumber, twilioNumber, 'Could not get ride status.');
           }
-        } catch (error) {
-          console.error('Uber status error:', error.message);
-          responseText = 'Could not get ride status.';
-        }
-        break;
+        })();
+
+        res.setHeader('Content-Type', 'text/xml');
+        res.status(200).send(twiml.toString());
+        return;
       }
 
       case 'uber_cancel': {
-        // Check for active ride first
+        // Check for active ride first (fast DB lookup)
         const activeId = await getActiveRide(fromNumber);
         if (activeId) {
-          try {
-            await cancelUberRide(activeId);
-            await clearActiveRide(fromNumber);
-            responseText = 'Uber ride canceled.';
-          } catch (error) {
-            console.error('Uber cancel error:', error.message);
-            responseText = error.message || 'Could not cancel ride.';
-          }
-          break;
+          const twilioNumber = req.body.To;
+
+          // Send immediate acknowledgment
+          twiml.message('Canceling your Uber...');
+
+          // Run async - cancelUberRide uses browser automation
+          (async () => {
+            try {
+              await cancelUberRide(activeId);
+              await clearActiveRide(fromNumber);
+              await sendAsyncSMS(fromNumber, twilioNumber, 'Uber ride canceled.');
+            } catch (error) {
+              console.error('Uber cancel error:', error.message);
+              await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not cancel ride.');
+            }
+          })();
+
+          res.setHeader('Content-Type', 'text/xml');
+          res.status(200).send(twiml.toString());
+          return;
         }
 
-        // Check for pending ride
+        // Check for pending ride (fast DB operations - respond synchronously)
         const pendingToCancel = await getPendingRide(fromNumber);
         if (pendingToCancel) {
           await clearPendingRide(fromNumber);
