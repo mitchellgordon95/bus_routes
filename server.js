@@ -14,11 +14,14 @@ const {
   clearPendingRide,
   saveActiveRide,
   getActiveRide,
-  clearActiveRide
+  clearActiveRide,
+  savePendingAuth,
+  getPendingAuth,
+  clearPendingAuth
 } = require('./uber-pending');
 
 // Uber agent (browser automation via Claude Agent SDK)
-const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
+const { getUberQuote, enterUberAuthCode, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -186,8 +189,20 @@ app.post('/sms', async (req, res) => {
         (async () => {
           const uberStart = Date.now();
           try {
-            const quote = await getUberQuote(parsed.pickup, parsed.destination);
+            // Pass user's phone for auto-login if needed
+            const quote = await getUberQuote(parsed.pickup, parsed.destination, fromNumber);
             console.log(`[TIMING] uber-quote-total: ${Date.now() - uberStart}ms`);
+
+            // Check if auth is required (SMS code needed)
+            if (quote.requiresAuth) {
+              await savePendingAuth(fromNumber, 'quote', {
+                pickup: parsed.pickup,
+                destination: parsed.destination
+              });
+              await sendAsyncSMS(fromNumber, twilioNumber,
+                'Uber needs SMS verification. Check your texts from Uber, then reply: uber auth <code>');
+              return;
+            }
 
             await savePendingRide(fromNumber, quote);
 
@@ -324,6 +339,48 @@ app.post('/sms', async (req, res) => {
 
         responseText = 'No active or pending Uber ride to cancel.';
         break;
+      }
+
+      case 'uber_auth': {
+        // Get pending auth (validates there's an auth flow in progress)
+        const pendingAuth = await getPendingAuth(fromNumber);
+        if (!pendingAuth) {
+          responseText = 'No pending Uber auth. Request a ride first with "uber [pickup] to [destination]".';
+          break;
+        }
+
+        const twilioNumber = req.body.To;
+
+        // Send immediate acknowledgment
+        twiml.message('Entering auth code...');
+
+        // Run async
+        (async () => {
+          try {
+            const result = await enterUberAuthCode(parsed.code, pendingAuth, fromNumber);
+            await clearPendingAuth(fromNumber);
+
+            if (result.pickup) {
+              // Got a quote after auth
+              await savePendingRide(fromNumber, result);
+              const msg = result.requiresLogin
+                ? `Uber available: ${result.availableProducts?.slice(0, 4).join(', ') || 'UberX'}\n\nFrom: ${result.pickup.address}\nTo: ${result.destination.address}\n\nPrices require Uber login.`
+                : `${result.productName}: ${result.priceEstimate}, ${result.eta} pickup\n\nFrom: ${result.pickup.address}\nTo: ${result.destination.address}\n\nReply "uber confirm" to book.`;
+              await sendAsyncSMS(fromNumber, twilioNumber, msg);
+            } else {
+              // Just logged in
+              await sendAsyncSMS(fromNumber, twilioNumber,
+                'Logged into Uber! Now try your request again.');
+            }
+          } catch (error) {
+            console.error('Uber auth error:', error.message);
+            await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Auth failed. Try again.');
+          }
+        })();
+
+        res.setHeader('Content-Type', 'text/xml');
+        res.status(200).send(twiml.toString());
+        return;
       }
 
       case 'food_query': {

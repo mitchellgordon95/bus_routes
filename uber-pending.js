@@ -1,6 +1,7 @@
 const { Pool } = require('pg');
 
 const EXPIRY_MINUTES = 10;
+const AUTH_EXPIRY_MINUTES = 5;
 
 // Create a connection pool using DATABASE_URL
 const pool = new Pool({
@@ -33,6 +34,16 @@ async function initTable() {
     CREATE TABLE IF NOT EXISTS active_uber_rides (
       phone VARCHAR(20) PRIMARY KEY,
       request_id TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  // Table for pending auth (waiting for SMS code)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pending_uber_auth (
+      phone VARCHAR(20) PRIMARY KEY,
+      action TEXT NOT NULL,
+      pickup TEXT,
+      destination TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
@@ -192,6 +203,62 @@ async function cleanupExpiredRides() {
   console.log(`[TIMING] uber-db-cleanup: ${Date.now() - queryStart}ms (${result.rowCount || 0} removed)`);
 }
 
+/**
+ * Save pending auth state (waiting for SMS code)
+ * @param {string} phone - User's phone number
+ * @param {string} action - What action was attempted ('quote', 'confirm', etc.)
+ * @param {Object} context - Context for resuming (pickup, destination)
+ */
+async function savePendingAuth(phone, action, context = {}) {
+  await initTable();
+
+  const queryStart = Date.now();
+  await pool.query(`
+    INSERT INTO pending_uber_auth (phone, action, pickup, destination)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (phone)
+    DO UPDATE SET action = $2, pickup = $3, destination = $4, created_at = NOW()
+  `, [phone, action, context.pickup || null, context.destination || null]);
+  console.log(`[TIMING] uber-db-savePendingAuth: ${Date.now() - queryStart}ms`);
+}
+
+/**
+ * Get pending auth for a phone number
+ * @param {string} phone - User's phone number
+ * @returns {Promise<Object|null>} Pending auth or null if expired/not found
+ */
+async function getPendingAuth(phone) {
+  await initTable();
+
+  const queryStart = Date.now();
+  const { rows } = await pool.query(`
+    SELECT * FROM pending_uber_auth
+    WHERE phone = $1
+    AND created_at > NOW() - INTERVAL '${AUTH_EXPIRY_MINUTES} minutes'
+  `, [phone]);
+  console.log(`[TIMING] uber-db-getPendingAuth: ${Date.now() - queryStart}ms`);
+
+  if (!rows[0]) return null;
+
+  return {
+    action: rows[0].action,
+    pickup: rows[0].pickup,
+    destination: rows[0].destination
+  };
+}
+
+/**
+ * Clear pending auth after code is entered
+ * @param {string} phone - User's phone number
+ */
+async function clearPendingAuth(phone) {
+  await initTable();
+
+  const queryStart = Date.now();
+  await pool.query('DELETE FROM pending_uber_auth WHERE phone = $1', [phone]);
+  console.log(`[TIMING] uber-db-clearPendingAuth: ${Date.now() - queryStart}ms`);
+}
+
 module.exports = {
   savePendingRide,
   getPendingRide,
@@ -199,5 +266,8 @@ module.exports = {
   saveActiveRide,
   getActiveRide,
   clearActiveRide,
-  cleanupExpiredRides
+  cleanupExpiredRides,
+  savePendingAuth,
+  getPendingAuth,
+  clearPendingAuth
 };

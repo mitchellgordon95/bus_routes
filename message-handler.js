@@ -30,6 +30,12 @@ class MessageParser {
       return { type: 'uber_cancel' };
     }
 
+    // Uber auth code: "uber auth 123456" or "uber code 123456"
+    const authMatch = lower.match(/^uber\s+(?:auth|code)\s+(\d{4,8})$/);
+    if (authMatch) {
+      return { type: 'uber_auth', code: authMatch[1] };
+    }
+
     // Uber ride quote: "uber [pickup] to [destination]"
     const uberMatch = lower.match(/^uber\s+(.+?)\s+to\s+(.+)$/);
     if (uberMatch) {
@@ -126,6 +132,7 @@ Calorie Tracking:
 
 Uber:
 • "uber [pickup] to [dest]" - get quote
+• "uber auth 123456" - enter SMS code
 • "uber confirm" - book the ride
 • "uber status" - check ride status
 • "uber cancel" - cancel ride
