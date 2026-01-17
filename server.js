@@ -21,7 +21,7 @@ const {
 } = require('./uber-pending');
 
 // Uber agent (browser automation via Claude Agent SDK)
-const { getUberQuote, enterUberAuthCode, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
+const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -189,8 +189,7 @@ app.post('/sms', async (req, res) => {
         (async () => {
           const uberStart = Date.now();
           try {
-            // Pass user's phone for auto-login if needed
-            const quote = await getUberQuote(parsed.pickup, parsed.destination, fromNumber);
+            const quote = await getUberQuote(parsed.pickup, parsed.destination);
             console.log(`[TIMING] uber-quote-total: ${Date.now() - uberStart}ms`);
 
             // Check if auth is required (SMS code needed)
@@ -352,26 +351,29 @@ app.post('/sms', async (req, res) => {
         const twilioNumber = req.body.To;
 
         // Send immediate acknowledgment
-        twiml.message('Entering auth code...');
+        twiml.message('Entering auth code and getting quote...');
 
-        // Run async
+        // Run async - call getUberQuote with the SMS code to continue where we left off
         (async () => {
           try {
-            const result = await enterUberAuthCode(parsed.code, pendingAuth, fromNumber);
+            const quote = await getUberQuote(pendingAuth.pickup, pendingAuth.destination, parsed.code);
             await clearPendingAuth(fromNumber);
 
-            if (result.pickup) {
-              // Got a quote after auth
-              await savePendingRide(fromNumber, result);
-              const msg = result.requiresLogin
-                ? `Uber available: ${result.availableProducts?.slice(0, 4).join(', ') || 'UberX'}\n\nFrom: ${result.pickup.address}\nTo: ${result.destination.address}\n\nPrices require Uber login.`
-                : `${result.productName}: ${result.priceEstimate}, ${result.eta} pickup\n\nFrom: ${result.pickup.address}\nTo: ${result.destination.address}\n\nReply "uber confirm" to book.`;
-              await sendAsyncSMS(fromNumber, twilioNumber, msg);
-            } else {
-              // Just logged in
+            // Check if auth still required (shouldn't happen, but handle it)
+            if (quote.requiresAuth) {
               await sendAsyncSMS(fromNumber, twilioNumber,
-                'Logged into Uber! Now try your request again.');
+                'Auth still required. Check your texts from Uber and reply: uber auth <code>');
+              return;
             }
+
+            // Got the quote - save it and send to user
+            await savePendingRide(fromNumber, quote);
+
+            const msg = quote.requiresLogin
+              ? `Uber available: ${quote.availableProducts?.slice(0, 4).join(', ') || 'UberX'}\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nPrices require Uber login.`
+              : `${quote.productName}: ${quote.priceEstimate}, ${quote.eta} pickup\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nReply "uber confirm" to book.`;
+
+            await sendAsyncSMS(fromNumber, twilioNumber, msg);
           } catch (error) {
             console.error('Uber auth error:', error.message);
             await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Auth failed. Try again.');
