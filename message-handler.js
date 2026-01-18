@@ -20,8 +20,13 @@ class MessageParser {
     }
 
     // Uber commands (check specific commands before general pattern)
-    if (lower === 'uber confirm') {
-      return { type: 'uber_confirm' };
+    // "uber confirm" or "uber confirm 2" or "uber confirm comfort"
+    const confirmMatch = lower.match(/^uber\s+confirm(?:\s+(\S+))?$/);
+    if (confirmMatch) {
+      return {
+        type: 'uber_confirm',
+        selection: confirmMatch[1] || '1'  // default to first option
+      };
     }
     if (lower === 'uber status') {
       return { type: 'uber_status' };
@@ -133,7 +138,8 @@ Calorie Tracking:
 Uber:
 • "uber [pickup] to [dest]" - get quote
 • "uber auth 123456" - enter SMS code
-• "uber confirm" - book the ride
+• "uber confirm 1" - book option 1
+• "uber confirm comfort" - book by name
 • "uber status" - check ride status
 • "uber cancel" - cancel ride
 

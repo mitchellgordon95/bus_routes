@@ -19,15 +19,14 @@ async function initTable() {
       phone VARCHAR(20) PRIMARY KEY,
       pickup_address TEXT NOT NULL,
       destination_address TEXT NOT NULL,
-      pickup_lat DECIMAL(10, 7) NOT NULL,
-      pickup_lng DECIMAL(10, 7) NOT NULL,
-      dest_lat DECIMAL(10, 7) NOT NULL,
-      dest_lng DECIMAL(10, 7) NOT NULL,
-      product_id TEXT NOT NULL,
-      product_name TEXT NOT NULL,
-      price_estimate TEXT NOT NULL,
+      products_json TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     )
+  `);
+  // Add products_json column if it doesn't exist (migration for existing tables)
+  await pool.query(`
+    ALTER TABLE pending_uber_rides
+    ADD COLUMN IF NOT EXISTS products_json TEXT
   `);
   // Also create table for active rides
   await pool.query(`
@@ -61,34 +60,20 @@ async function savePendingRide(phone, quote) {
   const queryStart = Date.now();
   await pool.query(`
     INSERT INTO pending_uber_rides (
-      phone, pickup_address, destination_address,
-      pickup_lat, pickup_lng, dest_lat, dest_lng,
-      product_id, product_name, price_estimate
+      phone, pickup_address, destination_address, products_json
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    VALUES ($1, $2, $3, $4)
     ON CONFLICT (phone)
     DO UPDATE SET
       pickup_address = $2,
       destination_address = $3,
-      pickup_lat = $4,
-      pickup_lng = $5,
-      dest_lat = $6,
-      dest_lng = $7,
-      product_id = $8,
-      product_name = $9,
-      price_estimate = $10,
+      products_json = $4,
       created_at = NOW()
   `, [
     phone,
     quote.pickup.address,
     quote.destination.address,
-    quote.pickup.lat,
-    quote.pickup.lng,
-    quote.destination.lat,
-    quote.destination.lng,
-    quote.productId,
-    quote.productName,
-    quote.priceEstimate
+    JSON.stringify(quote.products)
   ]);
   console.log(`[TIMING] uber-db-savePending: ${Date.now() - queryStart}ms`);
 }
@@ -113,19 +98,13 @@ async function getPendingRide(phone) {
 
   const row = rows[0];
   return {
+    products: row.products_json ? JSON.parse(row.products_json) : [],
     pickup: {
-      address: row.pickup_address,
-      lat: parseFloat(row.pickup_lat),
-      lng: parseFloat(row.pickup_lng)
+      address: row.pickup_address
     },
     destination: {
-      address: row.destination_address,
-      lat: parseFloat(row.dest_lat),
-      lng: parseFloat(row.dest_lng)
-    },
-    productId: row.product_id,
-    productName: row.product_name,
-    priceEstimate: row.price_estimate
+      address: row.destination_address
+    }
   };
 }
 

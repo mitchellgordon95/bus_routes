@@ -205,12 +205,16 @@ app.post('/sms', async (req, res) => {
 
             await savePendingRide(fromNumber, quote);
 
-            let msg;
-            if (quote.requiresLogin) {
-              const products = quote.availableProducts?.slice(0, 4).join(', ') || 'UberX';
-              msg = `Uber available: ${products}\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nPrices require Uber login. Open Uber app to book.`;
+            // Format numbered list of products with prices
+            let msg = `Uber from ${quote.pickup.address} to ${quote.destination.address}:\n\n`;
+            const products = quote.products || [];
+            products.slice(0, 5).forEach((p, i) => {
+              msg += `${i + 1}. ${p.name} - ${p.price} (${p.eta})\n`;
+            });
+            if (products.length > 0) {
+              msg += `\nReply "uber confirm 1" to book ${products[0].name}`;
             } else {
-              msg = `${quote.productName}: ${quote.priceEstimate}, ${quote.eta} pickup\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nReply "uber confirm" to book.`;
+              msg += `No products available. Try a different route.`;
             }
 
             await sendAsyncSMS(fromNumber, twilioNumber, msg);
@@ -234,16 +238,34 @@ app.post('/sms', async (req, res) => {
           break;
         }
 
+        // Resolve selection to product index
+        const selection = parsed.selection;
+        let productIndex = 0;
+        if (/^\d+$/.test(selection)) {
+          productIndex = parseInt(selection, 10) - 1;  // 1-indexed for user
+        } else {
+          // Find by name (case-insensitive)
+          productIndex = pendingRide.products.findIndex(
+            p => p.name.toLowerCase() === selection.toLowerCase()
+          );
+        }
+
+        if (productIndex < 0 || productIndex >= pendingRide.products.length) {
+          responseText = `Invalid selection. Choose 1-${pendingRide.products.length} or product name.`;
+          break;
+        }
+
+        const selectedProduct = pendingRide.products[productIndex];
         const twilioNumber = req.body.To;
 
-        // Send immediate acknowledgment
-        twiml.message('Booking your Uber... (this may take a moment)');
+        // Send immediate acknowledgment with selected product
+        twiml.message(`Booking ${selectedProduct.name} for ${selectedProduct.price}...`);
 
         // Run async - don't await
         (async () => {
           const uberStart = Date.now();
           try {
-            const ride = await confirmUberRide(pendingRide);
+            const ride = await confirmUberRide(pendingRide, productIndex);
             console.log(`[TIMING] uber-confirm-total: ${Date.now() - uberStart}ms`);
 
             await saveActiveRide(fromNumber, ride.requestId);
@@ -267,8 +289,11 @@ app.post('/sms', async (req, res) => {
         if (!activeRequestId) {
           // Check for pending ride (fast DB lookup - respond synchronously)
           const pending = await getPendingRide(fromNumber);
-          if (pending) {
-            responseText = `Pending: ${pending.productName} ${pending.priceEstimate}\nFrom: ${pending.pickup.address}\nTo: ${pending.destination.address}\n\nReply "uber confirm" to book.`;
+          if (pending && pending.products?.length > 0) {
+            const firstProduct = pending.products[0];
+            responseText = `Pending: ${firstProduct.name} ${firstProduct.price}\nFrom: ${pending.pickup.address}\nTo: ${pending.destination.address}\n\nReply "uber confirm" to book.`;
+          } else if (pending) {
+            responseText = `Pending ride from ${pending.pickup.address} to ${pending.destination.address}\n\nReply "uber confirm" to book.`;
           } else {
             responseText = 'No active Uber ride. Text "uber [pickup] to [destination]" to get started.';
           }
@@ -369,9 +394,17 @@ app.post('/sms', async (req, res) => {
             // Got the quote - save it and send to user
             await savePendingRide(fromNumber, quote);
 
-            const msg = quote.requiresLogin
-              ? `Uber available: ${quote.availableProducts?.slice(0, 4).join(', ') || 'UberX'}\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nPrices require Uber login.`
-              : `${quote.productName}: ${quote.priceEstimate}, ${quote.eta} pickup\n\nFrom: ${quote.pickup.address}\nTo: ${quote.destination.address}\n\nReply "uber confirm" to book.`;
+            // Format numbered list of products with prices
+            let msg = `Uber from ${quote.pickup.address} to ${quote.destination.address}:\n\n`;
+            const products = quote.products || [];
+            products.slice(0, 5).forEach((p, i) => {
+              msg += `${i + 1}. ${p.name} - ${p.price} (${p.eta})\n`;
+            });
+            if (products.length > 0) {
+              msg += `\nReply "uber confirm 1" to book ${products[0].name}`;
+            } else {
+              msg += `No products available. Try a different route.`;
+            }
 
             await sendAsyncSMS(fromNumber, twilioNumber, msg);
           } catch (error) {

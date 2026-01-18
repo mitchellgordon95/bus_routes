@@ -145,9 +145,11 @@ ${smsCode
 
 RESPONSE FORMAT - return ONLY JSON, no other text:
 {
-  "price": "$XX-XX",
-  "eta": "X min",
-  "products": ["UberX", "Comfort", ...],
+  "products": [
+    {"name": "UberX", "price": "$XX.XX", "eta": "X min"},
+    {"name": "Comfort", "price": "$XX.XX", "eta": "X min"},
+    ...
+  ],
   "pickupAddress": "resolved address",
   "destAddress": "resolved address"
 }`
@@ -183,23 +185,14 @@ RESPONSE FORMAT - return ONLY JSON, no other text:
               };
             }
 
-            // Format response to match existing interface
+            // Return products array with individual prices
             return {
-              productId: 'uberx',
-              productName: result.products?.[0] || 'UberX',
-              priceEstimate: result.price || 'Price unavailable',
-              eta: result.eta || '5-10 min',
-              availableProducts: result.products || [],
-              requiresLogin: result.requiresLogin || false,
+              products: result.products || [],
               pickup: {
-                address: result.pickupAddress || pickup,
-                lat: 0,
-                lng: 0
+                address: result.pickupAddress || pickup
               },
               destination: {
-                address: result.destAddress || destination,
-                lat: 0,
-                lng: 0
+                address: result.destAddress || destination
               }
             };
           }
@@ -262,11 +255,14 @@ RESPONSE FORMAT - return ONLY JSON, no other text:
  * Confirm and book an Uber ride
  * NOTE: This requires the user to be logged in. For now, returns a placeholder.
  * @param {Object} pendingRide - Saved ride details from getUberQuote
+ * @param {number} productIndex - Index of selected product (0-based)
  * @returns {Promise<Object>} Ride confirmation details
  */
-async function confirmUberRide(pendingRide) {
-  console.log(`[UBER] Confirming ride to ${pendingRide.destination.address}`);
-  throw new Error('Uber booking requires login. Feature coming soon. Please book directly in Uber app.');
+async function confirmUberRide(pendingRide, productIndex = 0) {
+  const product = pendingRide.products?.[productIndex];
+  const productInfo = product ? `${product.name} for ${product.price}` : 'ride';
+  console.log(`[UBER] Confirming ${productInfo} to ${pendingRide.destination.address}`);
+  throw new Error(`Booking ${productInfo} - feature coming soon. Please book directly in Uber app.`);
 }
 
 /**
