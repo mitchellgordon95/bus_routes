@@ -252,17 +252,189 @@ RESPONSE FORMAT - return ONLY JSON, no other text:
 }
 
 /**
- * Confirm and book an Uber ride
- * NOTE: This requires the user to be logged in. For now, returns a placeholder.
+ * Parse price string like "$54.51" to number 54.51
+ */
+function parsePrice(priceStr) {
+  if (!priceStr) return null;
+  const match = priceStr.match(/\$?([\d.]+)/);
+  return match ? parseFloat(match[1]) : null;
+}
+
+/**
+ * Confirm and book an Uber ride using browser automation
  * @param {Object} pendingRide - Saved ride details from getUberQuote
  * @param {number} productIndex - Index of selected product (0-based)
  * @returns {Promise<Object>} Ride confirmation details
  */
 async function confirmUberRide(pendingRide, productIndex = 0) {
   const product = pendingRide.products?.[productIndex];
-  const productInfo = product ? `${product.name} for ${product.price}` : 'ride';
-  console.log(`[UBER] Confirming ${productInfo} to ${pendingRide.destination.address}`);
-  throw new Error(`Booking ${productInfo} - feature coming soon. Please book directly in Uber app.`);
+  if (!product) {
+    throw new Error('Invalid product selection');
+  }
+
+  const quotedPrice = parsePrice(product.price);
+  console.log(`[UBER] Confirming ${product.name} for ${product.price} to ${pendingRide.destination.address}`);
+  const startTime = Date.now();
+
+  // Load MCP SDK (ESM dynamic import)
+  await loadMcpSdk();
+
+  const mcpUrl = new URL('/mcp', MCP_BASE_URL);
+  const transport = new StreamableHTTPClientTransport(mcpUrl);
+  const mcpClient = new Client({ name: 'uber-confirm-agent', version: '1.0.0' });
+
+  try {
+    await mcpClient.connect(transport);
+    console.log(`[UBER] Connected to MCP server for booking`);
+
+    const { tools } = await mcpClient.listTools();
+    const claudeTools = tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema
+    }));
+
+    const systemPrompt = `You are a browser automation agent. Use the browser tools to book an Uber ride. You MUST verify the price before confirming.`;
+
+    const messages = [{
+      role: 'user',
+      content: `Book an Uber ${product.name} ride.
+
+CRITICAL PRICE CHECK:
+- Quoted price: ${product.price}
+- Maximum allowed price: $${(quotedPrice + 3).toFixed(2)}
+- If current price exceeds maximum, DO NOT BOOK. Return error.
+
+EXPECTED STATE:
+- Browser should already be on Uber product selection page
+- From: ${pendingRide.pickup.address}
+- To: ${pendingRide.destination.address}
+
+STEPS:
+1. Take a snapshot to see current page state
+2. If not on product selection page, navigate to https://m.uber.com/go/home and re-enter:
+   - Pickup: ${pendingRide.pickup.address}
+   - Destination: ${pendingRide.destination.address}
+3. Find and select the "${product.name}" product option
+4. IMPORTANT: Check the current price shown for ${product.name}
+   - Extract the exact price shown on the page
+   - If price > $${(quotedPrice + 3).toFixed(2)}, STOP and return error
+5. Click the "Request ${product.name}" or "Confirm" button
+6. Wait for driver assignment (may take 10-30 seconds)
+7. Extract driver and vehicle info from confirmation screen
+
+RESPONSE FORMAT - return ONLY JSON:
+{
+  "success": true,
+  "currentPrice": "$XX.XX",
+  "driverName": "Driver Name",
+  "vehicle": "Vehicle Make Model - License Plate",
+  "eta": "X min",
+  "requestId": "if visible"
+}
+
+OR if price exceeded:
+{
+  "success": false,
+  "error": "price_exceeded",
+  "quotedPrice": "${product.price}",
+  "currentPrice": "$XX.XX",
+  "message": "Price increased from ${product.price} to $XX.XX (exceeds $3 tolerance)"
+}
+
+OR if booking failed:
+{
+  "success": false,
+  "error": "booking_failed",
+  "message": "reason for failure"
+}`
+    }];
+
+    // Agent loop
+    let maxIterations = 30;
+    while (maxIterations-- > 0) {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: systemPrompt,
+        tools: claudeTools,
+        messages
+      });
+
+      if (response.stop_reason === 'end_turn') {
+        const textBlock = response.content.find(c => c.type === 'text');
+        if (textBlock?.text) {
+          const jsonMatch = textBlock.text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const result = JSON.parse(jsonMatch[0]);
+            console.log(`[UBER] Booking completed in ${Date.now() - startTime}ms`);
+            console.log(`[UBER] Result: ${JSON.stringify(result)}`);
+
+            if (!result.success) {
+              if (result.error === 'price_exceeded') {
+                throw new Error(`Price increased to ${result.currentPrice} (was ${product.price}). Booking cancelled.`);
+              }
+              throw new Error(result.message || 'Booking failed');
+            }
+
+            return {
+              requestId: result.requestId || `uber-${Date.now()}`,
+              driverName: result.driverName || 'Driver assigned',
+              vehicle: result.vehicle || 'Vehicle assigned',
+              eta: result.eta || 'Arriving soon',
+              price: result.currentPrice || product.price
+            };
+          }
+        }
+        console.log(`[UBER] No JSON in booking response: ${textBlock?.text}`);
+        break;
+      }
+
+      // Execute tool calls
+      const toolUseBlocks = response.content.filter(c => c.type === 'tool_use');
+      if (toolUseBlocks.length === 0) {
+        console.log('[UBER] No tool calls in response, breaking');
+        break;
+      }
+
+      const toolResults = [];
+      for (const block of toolUseBlocks) {
+        const argsSummary = summarizeArgs(block.name, block.input);
+        console.log(`[UBER] Tool: ${block.name}(${argsSummary})`);
+
+        const toolStart = Date.now();
+        try {
+          const result = await mcpClient.callTool({ name: block.name, arguments: block.input });
+          const resultSummary = summarizeResult(block.name, result.content);
+          console.log(`[UBER]   → ${resultSummary} (${Date.now() - toolStart}ms)`);
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(result.content)
+          });
+        } catch (err) {
+          console.error(`[UBER]   → ERROR: ${err.message} (${Date.now() - toolStart}ms)`);
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify({ error: err.message }),
+            is_error: true
+          });
+        }
+      }
+
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({ role: 'user', content: toolResults });
+    }
+
+    throw new Error('Max iterations reached without completing booking');
+  } finally {
+    try {
+      await mcpClient.close();
+    } catch (e) {
+      // Ignore close errors
+    }
+  }
 }
 
 /**
