@@ -3,12 +3,18 @@
  * Manual Uber Login Script
  *
  * Connects to Playwright MCP server and opens Uber login page.
- * User logs in manually (solves CAPTCHA), cookies auto-save to user-data-dir.
+ * User logs in manually (solves CAPTCHA), then cookies are exported.
  *
  * Usage:
- *   Local:  node scripts/uber-login.js
- *   Prod:   PLAYWRIGHT_MCP_URL=http://playwright-mcp.railway.internal:3666 node scripts/uber-login.js
+ *   node scripts/uber-login.js
+ *
+ * After login, cookies are saved to:
+ *   - uber-cookies.json (for reference)
+ *   - Prints base64 string to set as UBER_COOKIES env var in Railway
  */
+
+const fs = require('fs');
+const path = require('path');
 
 const MCP_URL = process.env.PLAYWRIGHT_MCP_URL || 'http://localhost:3666';
 
@@ -39,7 +45,7 @@ async function main() {
     console.log('1. Log into Uber in the browser window');
     console.log('2. Solve any CAPTCHA challenges');
     console.log('3. Navigate around to confirm you\'re logged in');
-    console.log('4. Press Enter here when done to save session');
+    console.log('4. Press Enter here when done to export cookies');
     console.log('========================================\n');
 
     // Wait for user to press Enter
@@ -48,22 +54,61 @@ async function main() {
       process.stdin.once('data', resolve);
     });
 
-    // Take snapshot to verify login state
-    console.log('Taking snapshot to verify state...');
+    // Export cookies using browser_run_code
+    console.log('Exporting cookies...');
     const result = await client.callTool({
-      name: 'browser_snapshot',
-      arguments: {}
+      name: 'browser_run_code',
+      arguments: {
+        code: `async ({ context }) => {
+          const cookies = await context.cookies();
+          return JSON.stringify(cookies);
+        }`
+      }
     });
 
-    // Check if we can see logged-in indicators
-    const snapshot = JSON.stringify(result);
-    if (snapshot.includes('Account') || snapshot.includes('Activity') || snapshot.includes('rider')) {
-      console.log('\nLogin appears successful! Session saved to browser profile.');
-    } else {
-      console.log('\nSnapshot captured. Session saved (verify login state in browser).');
+    // Parse the result - it comes back as an array with text content
+    let cookies = [];
+    try {
+      const content = result.content || result;
+      const textContent = Array.isArray(content)
+        ? content.find(c => c.type === 'text')?.text
+        : (typeof content === 'string' ? content : JSON.stringify(content));
+
+      // The result might have extra wrapper text, try to extract JSON array
+      const jsonMatch = textContent.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        cookies = JSON.parse(jsonMatch[0]);
+      }
+    } catch (e) {
+      console.error('Failed to parse cookies:', e.message);
+      console.log('Raw result:', JSON.stringify(result, null, 2));
+      process.exit(1);
     }
 
-    console.log('You can now close this script. Future requests will use the saved session.');
+    if (!cookies.length) {
+      console.error('No cookies found! Make sure you logged in.');
+      process.exit(1);
+    }
+
+    // Filter to just Uber cookies
+    const uberCookies = cookies.filter(c =>
+      c.domain?.includes('uber.com')
+    );
+
+    console.log(`Found ${uberCookies.length} Uber cookies`);
+
+    // Save to JSON file
+    const cookiesPath = path.join(__dirname, '..', 'uber-cookies.json');
+    fs.writeFileSync(cookiesPath, JSON.stringify(uberCookies, null, 2));
+    console.log(`\nSaved to: ${cookiesPath}`);
+
+    // Output base64 for Railway env var
+    const base64 = Buffer.from(JSON.stringify(uberCookies)).toString('base64');
+    console.log('\n========================================');
+    console.log('  SET THIS AS UBER_COOKIES IN RAILWAY:');
+    console.log('========================================');
+    console.log(base64);
+    console.log('========================================\n');
 
   } finally {
     await client.close();
