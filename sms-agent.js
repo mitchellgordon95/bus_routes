@@ -20,6 +20,7 @@ const {
   clearPendingAuth
 } = require('./uber-pending');
 const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
+const { logSets, getExerciseCaloriesToday, getWorkoutHistory } = require('./workout-tracker');
 
 // --- SYSTEM PROMPT ---
 const SYSTEM_PROMPT = `You are TextPal, a personal SMS assistant. You help users via text message with:
@@ -27,6 +28,7 @@ const SYSTEM_PROMPT = `You are TextPal, a personal SMS assistant. You help users
 2. Calorie tracking
 3. Uber rides
 4. General questions
+5. Workout tracking & planning
 
 HOW TO RECOGNIZE REQUESTS:
 
@@ -53,6 +55,20 @@ Uber Rides:
 - "uber cancel" -> Call manage_uber_ride with action "cancel"
 - "uber auth 123456" or "uber code 123456" -> Call manage_uber_ride with action "auth"
 
+Workout Tracking:
+- Exercise descriptions like "bench 185 3x8", "squat 225 5x5", "pull-ups 3x10" → Call log_exercise
+- Natural language like "did 3 sets of 8 on bench at 185" → Call log_exercise
+- Parse the exercise name, weight, reps, and sets from whatever format the user provides
+- Bodyweight exercises (push-ups, pull-ups, dips) have no weight
+- "workout plan", "what should I do today", "gym plan" → Call get_workout_history, then generate a plan based on the data
+- "workout summary" or "what did I do this week" → Call get_workout_history and summarize
+
+When generating workout plans:
+- Look at recent history to determine which muscle groups need work
+- Suggest progressive overload (slightly more weight or reps than last time)
+- Include specific exercises, weights, sets, and reps based on the user's previous performance
+- If no history exists, ask about experience level and goals to create a starter plan
+
 General Questions:
 - For anything that doesn't match the above, respond conversationally without calling any tools.
 - You can answer general knowledge questions, give advice, chat, etc.
@@ -65,6 +81,7 @@ RESPONSE RULES:
 
 Bus Times: Send 6-digit stop code (e.g., 308209). Add route to filter (e.g., 308209 B63).
 Calories: Send food description or photo. "total" for daily count. "sub 50" to subtract. "target 2000" to set goal. "suggest 300" for ideas. "reset calories" to start over.
+Workout: "bench 185 3x8" or "did 3 sets of 8 on bench at 185" to log. "workout plan" for today's plan. "workout summary" for recent history.
 Uber: "uber [pickup] to [dest]" for quote. "uber confirm 1" to book. "uber status" / "uber cancel".`;
 
 // --- TOOL DEFINITIONS ---
@@ -177,6 +194,31 @@ const TOOLS = [
       },
       required: ['action']
     }
+  },
+  {
+    name: 'log_exercise',
+    description: 'Log weight lifting sets. Use when the user reports exercises they did.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        exercise: { type: 'string', description: 'Exercise name (e.g., "bench press", "squat", "pull-ups")' },
+        weight_lbs: { type: 'number', description: 'Weight in pounds. Omit or 0 for bodyweight exercises.' },
+        reps: { type: 'number', description: 'Reps per set' },
+        sets: { type: 'number', description: 'Number of sets (default 1)' }
+      },
+      required: ['exercise', 'reps']
+    }
+  },
+  {
+    name: 'get_workout_history',
+    description: 'Get recent workout history. Use this to generate workout plans or show exercise summaries.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        days: { type: 'number', description: 'Number of days of history to fetch (default 14)' }
+      },
+      required: []
+    }
   }
 ];
 
@@ -195,10 +237,13 @@ const toolHandlers = {
     const calorieData = await geminiAPI.estimateCalories(input.food_description);
     let text = geminiAPI.formatAsText(calorieData);
     if (calorieData.success && calorieData.totalCalories) {
-      const [dailyTotal, target] = await Promise.all([
-        addCalories(calorieData.totalCalories), getTarget()
+      const [dailyTotal, baseTarget, exerciseCals] = await Promise.all([
+        addCalories(calorieData.totalCalories), getTarget(), getExerciseCaloriesToday()
       ]);
-      text += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
+      const adjustedTarget = baseTarget + exerciseCals;
+      text += exerciseCals > 0
+        ? `\n\nDaily total: ${dailyTotal} / ${adjustedTarget} cal (${baseTarget} + ${exerciseCals} exercise)`
+        : `\n\nDaily total: ${dailyTotal} / ${baseTarget} cal`;
     }
     return { result: text };
   },
@@ -213,26 +258,39 @@ const toolHandlers = {
     );
     let text = geminiAPI.formatAsText(calorieData);
     if (calorieData.success && calorieData.totalCalories) {
-      const [dailyTotal, target] = await Promise.all([
-        addCalories(calorieData.totalCalories), getTarget()
+      const [dailyTotal, baseTarget, exerciseCals] = await Promise.all([
+        addCalories(calorieData.totalCalories), getTarget(), getExerciseCaloriesToday()
       ]);
-      text += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
+      const adjustedTarget = baseTarget + exerciseCals;
+      text += exerciseCals > 0
+        ? `\n\nDaily total: ${dailyTotal} / ${adjustedTarget} cal (${baseTarget} + ${exerciseCals} exercise)`
+        : `\n\nDaily total: ${dailyTotal} / ${baseTarget} cal`;
     }
     return { result: text };
   },
 
   async get_calorie_status(input, ctx) {
-    const [total, target] = await Promise.all([getTodayTotal(), getTarget()]);
-    return { result: `Today's total: ${total} / ${target} cal` };
+    const [total, baseTarget, exerciseCals] = await Promise.all([
+      getTodayTotal(), getTarget(), getExerciseCaloriesToday()
+    ]);
+    const adjustedTarget = baseTarget + exerciseCals;
+    const text = exerciseCals > 0
+      ? `Today's total: ${total} / ${adjustedTarget} cal (${baseTarget} + ${exerciseCals} exercise)`
+      : `Today's total: ${total} / ${baseTarget} cal`;
+    return { result: text };
   },
 
   async update_calories(input, ctx) {
     switch (input.action) {
       case 'subtract': {
-        const [newTotal, target] = await Promise.all([
-          subtractCalories(input.amount), getTarget()
+        const [newTotal, baseTarget, exerciseCals] = await Promise.all([
+          subtractCalories(input.amount), getTarget(), getExerciseCaloriesToday()
         ]);
-        return { result: `Subtracted ${input.amount} cal.\n\nDaily total: ${newTotal} / ${target} cal` };
+        const adjustedTarget = baseTarget + exerciseCals;
+        const display = exerciseCals > 0
+          ? `${newTotal} / ${adjustedTarget} cal (${baseTarget} + ${exerciseCals} exercise)`
+          : `${newTotal} / ${baseTarget} cal`;
+        return { result: `Subtracted ${input.amount} cal.\n\nDaily total: ${display}` };
       }
       case 'reset': {
         const previous = await resetToday();
@@ -250,6 +308,58 @@ const toolHandlers = {
   async get_food_suggestions(input, ctx) {
     const geminiAPI = new GeminiCalorieAPI(process.env.GEMINI_API_KEY);
     const text = await geminiAPI.getSuggestions(input.calories, input.descriptors || null);
+    return { result: text };
+  },
+
+  async log_exercise(input, ctx) {
+    const result = await logSets(
+      input.exercise,
+      input.weight_lbs || null,
+      input.reps,
+      input.sets || 1
+    );
+
+    const [baseTarget, exerciseCals] = await Promise.all([
+      getTarget(), getExerciseCaloriesToday()
+    ]);
+    const adjustedTarget = baseTarget + exerciseCals;
+
+    let text = `Logged: ${result.exercise}`;
+    if (result.weightLbs) text += ` ${result.weightLbs} lbs`;
+    text += ` - ${result.setsLogged} set${result.setsLogged > 1 ? 's' : ''} of ${result.reps}`;
+    text += ` (~${result.totalCaloriesThisExercise} cal)`;
+
+    if (result.todaySummary.length > 0) {
+      text += '\n\nToday: ';
+      text += result.todaySummary.map(s => {
+        let entry = s.exercise;
+        if (s.weightLbs) entry += ` ${s.weightLbs}`;
+        entry += ` ${s.sets}x${s.reps}`;
+        return entry;
+      }).join(', ');
+    }
+
+    text += `\nExercise calories: ~${exerciseCals} cal`;
+    text += `\nCalorie budget: ${adjustedTarget} (${baseTarget} + ${exerciseCals} exercise)`;
+
+    return { result: text };
+  },
+
+  async get_workout_history(input, ctx) {
+    const history = await getWorkoutHistory(input.days || 14);
+    if (history.length === 0) {
+      return { result: 'No workout history found. Start logging exercises to build your history!' };
+    }
+    let text = 'Recent workouts:\n';
+    for (const day of history) {
+      text += `\n${day.date}:`;
+      for (const ex of day.exercises) {
+        let entry = ` ${ex.exercise}`;
+        if (ex.weightLbs) entry += ` ${ex.weightLbs}lbs`;
+        entry += ` ${ex.sets}x${ex.reps}`;
+        text += `\n  -${entry}`;
+      }
+    }
     return { result: text };
   },
 
