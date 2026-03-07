@@ -85,15 +85,29 @@ class MTABusAPI {
     let message = `Bus arrivals at ${parsedData.stopName}:\n\n`;
 
     parsedData.arrivals.slice(0, maxResults).forEach((arrival, index) => {
-      const stopsText = arrival.stopsAway === 0
-        ? 'arriving now'
-        : `${arrival.stopsAway} stop${arrival.stopsAway > 1 ? 's' : ''} away`;
+      let etaText;
 
-      message += `Route ${arrival.route} to ${arrival.destination} - ${stopsText}`;
+      if (arrival.expectedArrival) {
+        const minutesAway = Math.round((new Date(arrival.expectedArrival) - Date.now()) / 60000);
 
-      if (!arrival.hasRealtimeData) {
-        message += ' (scheduled time)';
+        if (minutesAway <= 0 || arrival.stopsAway === 0) {
+          etaText = 'arriving now';
+        } else {
+          const stopsInfo = `${arrival.stopsAway} stop${arrival.stopsAway > 1 ? 's' : ''}`;
+          etaText = arrival.hasRealtimeData
+            ? `${minutesAway} min (${stopsInfo})`
+            : `~${minutesAway} min (${stopsInfo}, scheduled)`;
+        }
+      } else {
+        etaText = arrival.stopsAway === 0
+          ? 'arriving now'
+          : `${arrival.stopsAway} stop${arrival.stopsAway > 1 ? 's' : ''} away`;
+        if (!arrival.hasRealtimeData) {
+          etaText += ' (scheduled)';
+        }
       }
+
+      message += `Route ${arrival.route} to ${arrival.destination} - ${etaText}`;
 
       if (index < Math.min(maxResults, parsedData.arrivals.length) - 1) {
         message += '\n\n';

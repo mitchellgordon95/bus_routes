@@ -3,7 +3,10 @@ require('dotenv').config({ path: '.env.local' });
 const express = require('express');
 const twilio = require('twilio');
 
-// Import our API clients and message parser
+// Agent-based routing (primary)
+const { handleSMS } = require('./sms-agent');
+
+// Regex-based fallback (used when Claude API is unavailable)
 const MTABusAPI = require('./mta-api');
 const GeminiCalorieAPI = require('./gemini-api');
 const { MessageParser } = require('./message-handler');
@@ -19,8 +22,6 @@ const {
   getPendingAuth,
   clearPendingAuth
 } = require('./uber-pending');
-
-// Uber agent (browser automation via Claude Agent SDK)
 const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
 
 const app = express();
@@ -76,374 +77,57 @@ app.post('/sms', async (req, res) => {
   const twiml = new twilio.twiml.MessagingResponse();
   const incomingMessage = req.body.Body || '';
   const fromNumber = req.body.From;
+  const twilioNumber = req.body.To;
   const numMedia = parseInt(req.body.NumMedia || '0', 10);
 
   console.log(`Received from ${fromNumber}: ${incomingMessage} (${numMedia} media)`);
 
-  try {
-    // Initialize APIs with keys from environment
-    const mtaAPI = new MTABusAPI(process.env.MTA_API_KEY);
-    const geminiAPI = new GeminiCalorieAPI(process.env.GEMINI_API_KEY);
-    const parser = new MessageParser();
-
-    // Parse message through unified router
-    const parsed = parser.parse(incomingMessage, numMedia > 0, req.body.MediaContentType0);
-    let responseText;
-
-    switch (parsed.type) {
-      case 'help':
-        responseText = parser.getHelpText();
-        break;
-
-      case 'reset_calories': {
-        const dbStart = Date.now();
-        const previous = await resetToday();
-        console.log(`[TIMING] database-reset: ${Date.now() - dbStart}ms`);
-        responseText = `Daily calories reset. Previous total was ${previous} cal.`;
-        break;
-      }
-
-      case 'total': {
-        const dbStart = Date.now();
-        const [total, target] = await Promise.all([getTodayTotal(), getTarget()]);
-        console.log(`[TIMING] database-get-total: ${Date.now() - dbStart}ms`);
-        responseText = `Today's total: ${total} / ${target} cal`;
-        break;
-      }
-
-      case 'subtract': {
-        const dbStart = Date.now();
-        const [newTotal, target] = await Promise.all([subtractCalories(parsed.amount), getTarget()]);
-        console.log(`[TIMING] database-subtract: ${Date.now() - dbStart}ms`);
-        responseText = `Subtracted ${parsed.amount} cal.\n\nDaily total: ${newTotal} / ${target} cal`;
-        break;
-      }
-
-      case 'set_target': {
-        const dbStart = Date.now();
-        const newTarget = await setTarget(parsed.amount);
-        console.log(`[TIMING] database-set-target: ${Date.now() - dbStart}ms`);
-        responseText = `Daily target set to ${newTarget} cal.`;
-        break;
-      }
-
-      case 'suggestions': {
-        const geminiStart = Date.now();
-        responseText = await geminiAPI.getSuggestions(parsed.calories, parsed.descriptors);
-        console.log(`[TIMING] gemini-suggestions: ${Date.now() - geminiStart}ms`);
-        break;
-      }
-
-      case 'image_calorie': {
-        const mediaUrl = req.body.MediaUrl0;
-        const mediaType = req.body.MediaContentType0;
-        console.log(`Processing image: ${mediaType}`);
-
-        const fetchStart = Date.now();
-        const { buffer, contentType } = await fetchTwilioMedia(mediaUrl);
-        console.log(`[TIMING] twilio-media-fetch: ${Date.now() - fetchStart}ms`);
-
-        const geminiStart = Date.now();
-        const calorieData = await geminiAPI.estimateCaloriesFromImage(
-          buffer,
-          contentType,
-          parsed.textContext
-        );
-        console.log(`[TIMING] gemini-image-api: ${Date.now() - geminiStart}ms`);
-
-        responseText = geminiAPI.formatAsText(calorieData);
-
-        if (calorieData.success && calorieData.totalCalories) {
-          const dbStart = Date.now();
-          const [dailyTotal, target] = await Promise.all([addCalories(calorieData.totalCalories), getTarget()]);
-          console.log(`[TIMING] database-add: ${Date.now() - dbStart}ms`);
-          responseText += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
-        }
-        break;
-      }
-
-      case 'refresh':
-        responseText = 'Refresh not available. Please send your stop code again.';
-        break;
-
-      case 'stop_query': {
-        const mtaStart = Date.now();
-        const arrivalData = await mtaAPI.getStopArrivals(parsed.stopCode, parsed.route);
-        console.log(`[TIMING] mta-api: ${Date.now() - mtaStart}ms`);
-        responseText = mtaAPI.formatAsText(arrivalData);
-        responseText += '\n\nText "how" for all commands.';
-        break;
-      }
-
-      case 'service_changes':
-        responseText = `Service changes for ${parsed.route}: Feature coming soon. Check mta.info for current alerts.`;
-        break;
-
-      case 'uber_quote': {
-        const twilioNumber = req.body.To;
-
-        // Send immediate acknowledgment (avoids Twilio 15s timeout)
-        twiml.message('Getting Uber quote... (this may take a moment)');
-
-        // Run async - don't await
-        (async () => {
-          const uberStart = Date.now();
-          try {
-            const quote = await getUberQuote(parsed.pickup, parsed.destination);
-            console.log(`[TIMING] uber-quote-total: ${Date.now() - uberStart}ms`);
-
-            // Check if auth is required (SMS code needed)
-            if (quote.requiresAuth) {
-              await savePendingAuth(fromNumber, 'quote', {
-                pickup: parsed.pickup,
-                destination: parsed.destination
-              });
-              await sendAsyncSMS(fromNumber, twilioNumber,
-                'Uber needs SMS verification. Check your texts from Uber, then reply: uber auth <code>');
-              return;
-            }
-
-            await savePendingRide(fromNumber, quote);
-
-            // Format numbered list of products with prices
-            let msg = `Uber from ${quote.pickup.address} to ${quote.destination.address}:\n\n`;
-            const products = quote.products || [];
-            products.slice(0, 5).forEach((p, i) => {
-              msg += `${i + 1}. ${p.name} - ${p.price} (${p.eta})\n`;
-            });
-            if (products.length > 0) {
-              msg += `\nReply "uber confirm 1" to book ${products[0].name}`;
-            } else {
-              msg += `No products available. Try a different route.`;
-            }
-
-            await sendAsyncSMS(fromNumber, twilioNumber, msg);
-          } catch (error) {
-            console.error('Uber quote error:', error.message);
-            await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not get Uber quote. Check your addresses.');
-          }
-        })();
-
-        // Return immediately - response will be sent via async SMS
-        res.setHeader('Content-Type', 'text/xml');
-        res.status(200).send(twiml.toString());
-        return;
-      }
-
-      case 'uber_confirm': {
-        // Get pending ride (fast DB lookup)
-        const pendingRide = await getPendingRide(fromNumber);
-        if (!pendingRide) {
-          responseText = 'No pending Uber ride. Text "uber [pickup] to [destination]" first.';
-          break;
-        }
-
-        // Resolve selection to product index
-        const selection = parsed.selection;
-        let productIndex = 0;
-        if (/^\d+$/.test(selection)) {
-          productIndex = parseInt(selection, 10) - 1;  // 1-indexed for user
-        } else {
-          // Find by name (case-insensitive)
-          productIndex = pendingRide.products.findIndex(
-            p => p.name.toLowerCase() === selection.toLowerCase()
-          );
-        }
-
-        if (productIndex < 0 || productIndex >= pendingRide.products.length) {
-          responseText = `Invalid selection. Choose 1-${pendingRide.products.length} or product name.`;
-          break;
-        }
-
-        const selectedProduct = pendingRide.products[productIndex];
-        const twilioNumber = req.body.To;
-
-        // Send immediate acknowledgment with selected product
-        twiml.message(`Booking ${selectedProduct.name} for ${selectedProduct.price}...`);
-
-        // Run async - don't await
-        (async () => {
-          const uberStart = Date.now();
-          try {
-            const ride = await confirmUberRide(pendingRide, productIndex);
-            console.log(`[TIMING] uber-confirm-total: ${Date.now() - uberStart}ms`);
-
-            await saveActiveRide(fromNumber, ride.requestId);
-            await clearPendingRide(fromNumber);
-
-            await sendAsyncSMS(fromNumber, twilioNumber,
-              `Uber booked!\n\nDriver: ${ride.driverName}\nVehicle: ${ride.vehicle}\nETA: ${ride.eta}\n\nText "uber status" for updates.`);
-          } catch (error) {
-            console.error('Uber confirm error:', error.message);
-            await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not book Uber. Try again.');
-          }
-        })();
-
-        res.setHeader('Content-Type', 'text/xml');
-        res.status(200).send(twiml.toString());
-        return;
-      }
-
-      case 'uber_status': {
-        const activeRequestId = await getActiveRide(fromNumber);
-        if (!activeRequestId) {
-          // Check for pending ride (fast DB lookup - respond synchronously)
-          const pending = await getPendingRide(fromNumber);
-          if (pending && pending.products?.length > 0) {
-            const firstProduct = pending.products[0];
-            responseText = `Pending: ${firstProduct.name} ${firstProduct.price}\nFrom: ${pending.pickup.address}\nTo: ${pending.destination.address}\n\nReply "uber confirm" to book.`;
-          } else if (pending) {
-            responseText = `Pending ride from ${pending.pickup.address} to ${pending.destination.address}\n\nReply "uber confirm" to book.`;
-          } else {
-            responseText = 'No active Uber ride. Text "uber [pickup] to [destination]" to get started.';
-          }
-          break;
-        }
-
-        const twilioNumber = req.body.To;
-
-        // Send immediate acknowledgment
-        twiml.message('Checking ride status...');
-
-        // Run async - don't await (getUberStatus uses browser automation)
-        (async () => {
-          try {
-            const status = await getUberStatus(activeRequestId);
-            const msg = `Uber Status: ${status.status}\n\nDriver: ${status.driverName || 'Assigned'}\nETA: ${status.eta || 'Calculating...'}`;
-
-            if (['completed', 'rider_canceled', 'driver_canceled'].includes(status.status)) {
-              await clearActiveRide(fromNumber);
-            }
-
-            await sendAsyncSMS(fromNumber, twilioNumber, msg);
-          } catch (error) {
-            console.error('Uber status error:', error.message);
-            await sendAsyncSMS(fromNumber, twilioNumber, 'Could not get ride status.');
-          }
-        })();
-
-        res.setHeader('Content-Type', 'text/xml');
-        res.status(200).send(twiml.toString());
-        return;
-      }
-
-      case 'uber_cancel': {
-        // Check for active ride first (fast DB lookup)
-        const activeId = await getActiveRide(fromNumber);
-        if (activeId) {
-          const twilioNumber = req.body.To;
-
-          // Send immediate acknowledgment
-          twiml.message('Canceling your Uber...');
-
-          // Run async - cancelUberRide uses browser automation
-          (async () => {
-            try {
-              await cancelUberRide(activeId);
-              await clearActiveRide(fromNumber);
-              await sendAsyncSMS(fromNumber, twilioNumber, 'Uber ride canceled.');
-            } catch (error) {
-              console.error('Uber cancel error:', error.message);
-              await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not cancel ride.');
-            }
-          })();
-
-          res.setHeader('Content-Type', 'text/xml');
-          res.status(200).send(twiml.toString());
-          return;
-        }
-
-        // Check for pending ride (fast DB operations - respond synchronously)
-        const pendingToCancel = await getPendingRide(fromNumber);
-        if (pendingToCancel) {
-          await clearPendingRide(fromNumber);
-          responseText = 'Pending Uber request cleared.';
-          break;
-        }
-
-        responseText = 'No active or pending Uber ride to cancel.';
-        break;
-      }
-
-      case 'uber_auth': {
-        // Get pending auth (validates there's an auth flow in progress)
-        const pendingAuth = await getPendingAuth(fromNumber);
-        if (!pendingAuth) {
-          responseText = 'No pending Uber auth. Request a ride first with "uber [pickup] to [destination]".';
-          break;
-        }
-
-        const twilioNumber = req.body.To;
-
-        // Send immediate acknowledgment
-        twiml.message('Entering auth code and getting quote...');
-
-        // Run async - call getUberQuote with the SMS code to continue where we left off
-        (async () => {
-          try {
-            const quote = await getUberQuote(pendingAuth.pickup, pendingAuth.destination, parsed.code);
-            await clearPendingAuth(fromNumber);
-
-            // Check if auth still required (shouldn't happen, but handle it)
-            if (quote.requiresAuth) {
-              await sendAsyncSMS(fromNumber, twilioNumber,
-                'Auth still required. Check your texts from Uber and reply: uber auth <code>');
-              return;
-            }
-
-            // Got the quote - save it and send to user
-            await savePendingRide(fromNumber, quote);
-
-            // Format numbered list of products with prices
-            let msg = `Uber from ${quote.pickup.address} to ${quote.destination.address}:\n\n`;
-            const products = quote.products || [];
-            products.slice(0, 5).forEach((p, i) => {
-              msg += `${i + 1}. ${p.name} - ${p.price} (${p.eta})\n`;
-            });
-            if (products.length > 0) {
-              msg += `\nReply "uber confirm 1" to book ${products[0].name}`;
-            } else {
-              msg += `No products available. Try a different route.`;
-            }
-
-            await sendAsyncSMS(fromNumber, twilioNumber, msg);
-          } catch (error) {
-            console.error('Uber auth error:', error.message);
-            await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Auth failed. Try again.');
-          }
-        })();
-
-        res.setHeader('Content-Type', 'text/xml');
-        res.status(200).send(twiml.toString());
-        return;
-      }
-
-      case 'food_query': {
-        const geminiStart = Date.now();
-        const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
-        console.log(`[TIMING] gemini-text-api: ${Date.now() - geminiStart}ms`);
-        responseText = geminiAPI.formatAsText(calorieData);
-
-        if (calorieData.success && calorieData.totalCalories) {
-          const dbStart = Date.now();
-          const [dailyTotal, target] = await Promise.all([addCalories(calorieData.totalCalories), getTarget()]);
-          console.log(`[TIMING] database-add: ${Date.now() - dbStart}ms`);
-          responseText += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
-        }
-        break;
-      }
-
-      case 'error':
-      default:
-        responseText = parsed.message || 'Send "how" for available commands.';
-        break;
+  // Pre-fetch image if MMS
+  let imageBuffer = null, imageMediaType = null;
+  if (numMedia > 0 && req.body.MediaContentType0?.startsWith('image/')) {
+    try {
+      const fetchStart = Date.now();
+      const media = await fetchTwilioMedia(req.body.MediaUrl0);
+      console.log(`[TIMING] twilio-media-fetch: ${Date.now() - fetchStart}ms`);
+      imageBuffer = media.buffer;
+      imageMediaType = media.contentType;
+    } catch (err) {
+      console.error('Failed to fetch MMS image:', err.message);
     }
+  }
 
-    twiml.message(responseText);
+  try {
+    // Primary path: Claude agent routing
+    const result = await handleSMS({
+      message: incomingMessage,
+      fromNumber,
+      twilioNumber,
+      imageBuffer,
+      imageMediaType,
+      sendAsyncSMS
+    });
 
-  } catch (error) {
-    console.error('Error processing message:', error);
-    twiml.message('Sorry, there was an error processing your request. Please try again later.');
+    twiml.message(result.reply);
+  } catch (agentError) {
+    // Fallback: regex-based routing (when Claude API is unavailable)
+    console.error('[AGENT FALLBACK] Agent failed, using regex:', agentError.message);
+    try {
+      const responseText = await handleWithRegex(req, fromNumber, twilioNumber, imageBuffer, imageMediaType);
+
+      // handleWithRegex returns null for async operations (already sent TwiML)
+      if (responseText === null) {
+        res.setHeader('Content-Type', 'text/xml');
+        res.status(200).send(twiml.toString());
+        console.log(`[TIMING] total-request: ${Date.now() - requestStart}ms (fallback, async)`);
+        console.log('=== SMS Request End ===');
+        return;
+      }
+
+      twiml.message(responseText);
+    } catch (fallbackError) {
+      console.error('[FALLBACK FAILED]', fallbackError.message);
+      twiml.message('Sorry, there was an error processing your request. Please try again later.');
+    }
   }
 
   console.log(`[TIMING] total-request: ${Date.now() - requestStart}ms`);
@@ -452,6 +136,221 @@ app.post('/sms', async (req, res) => {
   res.setHeader('Content-Type', 'text/xml');
   res.status(200).send(twiml.toString());
 });
+
+/**
+ * Fallback handler using regex-based routing (original MessageParser logic)
+ * Used when the Claude agent is unavailable.
+ * Returns response text for sync operations, or null for async operations
+ * (async operations send their own TwiML via early return patterns).
+ */
+async function handleWithRegex(req, fromNumber, twilioNumber, imageBuffer, imageMediaType) {
+  const incomingMessage = req.body.Body || '';
+  const numMedia = parseInt(req.body.NumMedia || '0', 10);
+
+  const mtaAPI = new MTABusAPI(process.env.MTA_API_KEY);
+  const geminiAPI = new GeminiCalorieAPI(process.env.GEMINI_API_KEY);
+  const parser = new MessageParser();
+
+  const parsed = parser.parse(incomingMessage, numMedia > 0, req.body.MediaContentType0);
+
+  switch (parsed.type) {
+    case 'help':
+      return parser.getHelpText();
+
+    case 'reset_calories': {
+      const previous = await resetToday();
+      return `Daily calories reset. Previous total was ${previous} cal.`;
+    }
+
+    case 'total': {
+      const [total, target] = await Promise.all([getTodayTotal(), getTarget()]);
+      return `Today's total: ${total} / ${target} cal`;
+    }
+
+    case 'subtract': {
+      const [newTotal, target] = await Promise.all([subtractCalories(parsed.amount), getTarget()]);
+      return `Subtracted ${parsed.amount} cal.\n\nDaily total: ${newTotal} / ${target} cal`;
+    }
+
+    case 'set_target': {
+      const newTarget = await setTarget(parsed.amount);
+      return `Daily target set to ${newTarget} cal.`;
+    }
+
+    case 'suggestions': {
+      return await geminiAPI.getSuggestions(parsed.calories, parsed.descriptors);
+    }
+
+    case 'image_calorie': {
+      if (!imageBuffer) {
+        return 'Could not process image. Please try again.';
+      }
+      const calorieData = await geminiAPI.estimateCaloriesFromImage(
+        imageBuffer, imageMediaType, parsed.textContext
+      );
+      let text = geminiAPI.formatAsText(calorieData);
+      if (calorieData.success && calorieData.totalCalories) {
+        const [dailyTotal, target] = await Promise.all([addCalories(calorieData.totalCalories), getTarget()]);
+        text += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
+      }
+      return text;
+    }
+
+    case 'refresh':
+      return 'Refresh not available. Please send your stop code again.';
+
+    case 'stop_query': {
+      const arrivalData = await mtaAPI.getStopArrivals(parsed.stopCode, parsed.route);
+      return mtaAPI.formatAsText(arrivalData) + '\n\nText "how" for all commands.';
+    }
+
+    case 'service_changes':
+      return `Service changes for ${parsed.route}: Feature coming soon. Check mta.info for current alerts.`;
+
+    case 'uber_quote': {
+      // Fire async, return ack
+      (async () => {
+        try {
+          const quote = await getUberQuote(parsed.pickup, parsed.destination);
+          if (quote.requiresAuth) {
+            await savePendingAuth(fromNumber, 'quote', { pickup: parsed.pickup, destination: parsed.destination });
+            await sendAsyncSMS(fromNumber, twilioNumber, 'Uber needs SMS verification. Check your texts from Uber, then reply: uber auth <code>');
+            return;
+          }
+          await savePendingRide(fromNumber, quote);
+          let msg = `Uber from ${quote.pickup.address} to ${quote.destination.address}:\n\n`;
+          (quote.products || []).slice(0, 5).forEach((p, i) => { msg += `${i + 1}. ${p.name} - ${p.price} (${p.eta})\n`; });
+          msg += quote.products?.length > 0 ? `\nReply "uber confirm 1" to book ${quote.products[0].name}` : 'No products available.';
+          await sendAsyncSMS(fromNumber, twilioNumber, msg);
+        } catch (error) {
+          console.error('Uber quote error:', error.message);
+          await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not get Uber quote.');
+        }
+      })();
+      return 'Getting Uber quote... (this may take a moment)';
+    }
+
+    case 'uber_confirm': {
+      const pendingRide = await getPendingRide(fromNumber);
+      if (!pendingRide) return 'No pending Uber ride. Text "uber [pickup] to [destination]" first.';
+
+      const selection = parsed.selection;
+      let productIndex = 0;
+      if (/^\d+$/.test(selection)) {
+        productIndex = parseInt(selection, 10) - 1;
+      } else {
+        productIndex = pendingRide.products.findIndex(p => p.name.toLowerCase() === selection.toLowerCase());
+      }
+      if (productIndex < 0 || productIndex >= pendingRide.products.length) {
+        return `Invalid selection. Choose 1-${pendingRide.products.length} or product name.`;
+      }
+
+      const selectedProduct = pendingRide.products[productIndex];
+      (async () => {
+        try {
+          const ride = await confirmUberRide(pendingRide, productIndex);
+          await saveActiveRide(fromNumber, ride.requestId);
+          await clearPendingRide(fromNumber);
+          await sendAsyncSMS(fromNumber, twilioNumber,
+            `Uber booked!\n\nDriver: ${ride.driverName}\nVehicle: ${ride.vehicle}\nETA: ${ride.eta}\n\nText "uber status" for updates.`);
+        } catch (error) {
+          console.error('Uber confirm error:', error.message);
+          await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not book Uber. Try again.');
+        }
+      })();
+      return `Booking ${selectedProduct.name} for ${selectedProduct.price}...`;
+    }
+
+    case 'uber_status': {
+      const activeRequestId = await getActiveRide(fromNumber);
+      if (!activeRequestId) {
+        const pending = await getPendingRide(fromNumber);
+        if (pending && pending.products?.length > 0) {
+          const fp = pending.products[0];
+          return `Pending: ${fp.name} ${fp.price}\nFrom: ${pending.pickup.address}\nTo: ${pending.destination.address}\n\nReply "uber confirm" to book.`;
+        } else if (pending) {
+          return `Pending ride from ${pending.pickup.address} to ${pending.destination.address}\n\nReply "uber confirm" to book.`;
+        }
+        return 'No active Uber ride. Text "uber [pickup] to [destination]" to get started.';
+      }
+
+      (async () => {
+        try {
+          const status = await getUberStatus(activeRequestId);
+          const msg = `Uber Status: ${status.status}\n\nDriver: ${status.driverName || 'Assigned'}\nETA: ${status.eta || 'Calculating...'}`;
+          if (['completed', 'rider_canceled', 'driver_canceled'].includes(status.status)) await clearActiveRide(fromNumber);
+          await sendAsyncSMS(fromNumber, twilioNumber, msg);
+        } catch (error) {
+          console.error('Uber status error:', error.message);
+          await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not get ride status.');
+        }
+      })();
+      return 'Checking ride status...';
+    }
+
+    case 'uber_cancel': {
+      const activeId = await getActiveRide(fromNumber);
+      if (activeId) {
+        (async () => {
+          try {
+            await cancelUberRide(activeId);
+            await clearActiveRide(fromNumber);
+            await sendAsyncSMS(fromNumber, twilioNumber, 'Uber ride canceled.');
+          } catch (error) {
+            console.error('Uber cancel error:', error.message);
+            await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Could not cancel ride.');
+          }
+        })();
+        return 'Canceling your Uber...';
+      }
+      const pendingToCancel = await getPendingRide(fromNumber);
+      if (pendingToCancel) {
+        await clearPendingRide(fromNumber);
+        return 'Pending Uber request cleared.';
+      }
+      return 'No active or pending Uber ride to cancel.';
+    }
+
+    case 'uber_auth': {
+      const pendingAuth = await getPendingAuth(fromNumber);
+      if (!pendingAuth) return 'No pending Uber auth. Request a ride first with "uber [pickup] to [destination]".';
+
+      (async () => {
+        try {
+          const quote = await getUberQuote(pendingAuth.pickup, pendingAuth.destination, parsed.code);
+          await clearPendingAuth(fromNumber);
+          if (quote.requiresAuth) {
+            await sendAsyncSMS(fromNumber, twilioNumber, 'Auth still required. Check your texts from Uber and reply: uber auth <code>');
+            return;
+          }
+          await savePendingRide(fromNumber, quote);
+          let msg = `Uber from ${quote.pickup.address} to ${quote.destination.address}:\n\n`;
+          (quote.products || []).slice(0, 5).forEach((p, i) => { msg += `${i + 1}. ${p.name} - ${p.price} (${p.eta})\n`; });
+          msg += quote.products?.length > 0 ? `\nReply "uber confirm 1" to book ${quote.products[0].name}` : 'No products available.';
+          await sendAsyncSMS(fromNumber, twilioNumber, msg);
+        } catch (error) {
+          console.error('Uber auth error:', error.message);
+          await sendAsyncSMS(fromNumber, twilioNumber, error.message || 'Auth failed. Try again.');
+        }
+      })();
+      return 'Entering auth code and getting quote...';
+    }
+
+    case 'food_query': {
+      const calorieData = await geminiAPI.estimateCalories(parsed.foodDescription);
+      let text = geminiAPI.formatAsText(calorieData);
+      if (calorieData.success && calorieData.totalCalories) {
+        const [dailyTotal, target] = await Promise.all([addCalories(calorieData.totalCalories), getTarget()]);
+        text += `\n\nDaily total: ${dailyTotal} / ${target} cal`;
+      }
+      return text;
+    }
+
+    case 'error':
+    default:
+      return parsed.message || 'Send "how" for available commands.';
+  }
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
