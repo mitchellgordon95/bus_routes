@@ -20,7 +20,7 @@ const {
   clearPendingAuth
 } = require('./uber-pending');
 const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
-const { logSets, getExerciseCaloriesToday, getWorkoutHistory } = require('./workout-tracker');
+const { logSets, getExerciseCaloriesToday, getWorkoutHistory, updateExercise, deleteExercise, resetWorkoutHistory } = require('./workout-tracker');
 
 // --- SYSTEM PROMPT ---
 const SYSTEM_PROMPT = `You are TextPal, a personal SMS assistant. You help users via text message with:
@@ -62,6 +62,9 @@ Workout Tracking:
 - Bodyweight exercises (push-ups, pull-ups, dips) have no weight
 - "workout plan", "what should I do today", "gym plan" → Call get_workout_history, then generate a plan based on the data
 - "workout summary" or "what did I do this week" → Call get_workout_history and summarize
+- "actually did bench at 190" or "change bench to 190 3x8" → Call manage_workout with action "edit"
+- "delete bench" or "remove squats" → Call manage_workout with action "delete"
+- "reset workout history" → Call manage_workout with action "reset"
 
 When generating workout plans:
 - The user has an adjustable dumbbell set, a workout bench, and a pull-up bar. No barbell, no cable machine. Only suggest exercises doable with this equipment.
@@ -82,7 +85,7 @@ RESPONSE RULES:
 
 Bus Times: Send 6-digit stop code (e.g., 308209). Add route to filter (e.g., 308209 B63).
 Calories: Send food description or photo. "total" for daily count. "sub 50" to subtract. "target 2000" to set goal. "suggest 300" for ideas. "reset calories" to start over.
-Workout: "bench 185 3x8" or "did 3 sets of 8 on bench at 185" to log. "workout plan" for today's plan. "workout summary" for recent history.
+Workout: "bench 185 3x8" to log. "change bench to 190 3x8" to edit. "delete bench" to remove. "workout plan" for today's plan. "workout summary" for history. "reset workout history" to clear all.
 Uber: "uber [pickup] to [dest]" for quote. "uber confirm 1" to book. "uber status" / "uber cancel".`;
 
 // --- TOOL DEFINITIONS ---
@@ -219,6 +222,23 @@ const TOOLS = [
         days: { type: 'number', description: 'Number of days of history to fetch (default 14)' }
       },
       required: []
+    }
+  },
+  {
+    name: 'manage_workout',
+    description: 'Edit, delete, or reset workout entries.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['edit', 'delete', 'reset'], description: 'The action to perform' },
+        exercise: { type: 'string', description: 'Exercise name to edit/delete' },
+        old_weight_lbs: { type: 'number', description: 'Current weight to match (for edit)' },
+        old_reps: { type: 'number', description: 'Current reps to match (for edit)' },
+        new_weight_lbs: { type: 'number', description: 'New weight (for edit)' },
+        new_reps: { type: 'number', description: 'New reps (for edit)' },
+        new_sets: { type: 'number', description: 'New number of sets (for edit)' }
+      },
+      required: ['action']
     }
   }
 ];
@@ -362,6 +382,62 @@ const toolHandlers = {
       }
     }
     return { result: text };
+  },
+
+  async manage_workout(input, ctx) {
+    switch (input.action) {
+      case 'edit': {
+        if (!input.exercise) return { error: 'Exercise name required for edit.' };
+        const result = await updateExercise(
+          input.exercise,
+          input.old_weight_lbs ?? null,
+          input.old_reps ?? null,
+          input.new_weight_lbs ?? null,
+          input.new_reps ?? input.old_reps,
+          input.new_sets ?? 1
+        );
+        if (!result.found) {
+          return { result: `No matching exercise "${input.exercise}" found today.` };
+        }
+        let text = `Updated ${input.exercise}: ${result.deletedSets} old set${result.deletedSets > 1 ? 's' : ''} → ${result.newSets} new set${result.newSets > 1 ? 's' : ''}`;
+        if (result.todaySummary.length > 0) {
+          text += '\n\nToday: ';
+          text += result.todaySummary.map(s => {
+            let entry = s.exercise;
+            if (s.weightLbs) entry += ` ${s.weightLbs}`;
+            entry += ` ${s.sets}x${s.reps}`;
+            return entry;
+          }).join(', ');
+        }
+        return { result: text };
+      }
+      case 'delete': {
+        if (!input.exercise) return { error: 'Exercise name required for delete.' };
+        const result = await deleteExercise(input.exercise, input.old_weight_lbs ?? null, input.old_reps ?? null);
+        if (result.deletedSets === 0) {
+          return { result: `No "${input.exercise}" found in today's log.` };
+        }
+        let text = `Deleted ${result.deletedSets} set${result.deletedSets > 1 ? 's' : ''} of ${input.exercise}.`;
+        if (result.todaySummary.length > 0) {
+          text += '\n\nRemaining today: ';
+          text += result.todaySummary.map(s => {
+            let entry = s.exercise;
+            if (s.weightLbs) entry += ` ${s.weightLbs}`;
+            entry += ` ${s.sets}x${s.reps}`;
+            return entry;
+          }).join(', ');
+        } else {
+          text += '\n\nNo exercises logged today.';
+        }
+        return { result: text };
+      }
+      case 'reset': {
+        const result = await resetWorkoutHistory();
+        return { result: `Workout history cleared. ${result.deletedSets} total set${result.deletedSets !== 1 ? 's' : ''} removed.` };
+      }
+      default:
+        return { error: `Unknown action: ${input.action}` };
+    }
   },
 
   async request_uber_quote(input, ctx) {

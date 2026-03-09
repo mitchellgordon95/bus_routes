@@ -175,9 +175,100 @@ async function getWorkoutHistory(days = 14) {
   }));
 }
 
+/**
+ * Update an exercise logged today (delete old rows, insert new ones)
+ */
+async function updateExercise(exercise, oldWeightLbs, oldReps, newWeightLbs, newReps, newSets) {
+  await initTable();
+  const today = getTodayKey();
+
+  const queryStart = Date.now();
+
+  // Delete existing rows matching exercise + old weight + old reps
+  const deleteParams = [today, exercise.toLowerCase()];
+  let deleteWhere = 'date = $1 AND LOWER(exercise) = $2';
+  if (oldWeightLbs != null) {
+    deleteParams.push(oldWeightLbs);
+    deleteWhere += ` AND weight_lbs = $${deleteParams.length}`;
+  } else {
+    deleteWhere += ' AND weight_lbs IS NULL';
+  }
+  if (oldReps != null) {
+    deleteParams.push(oldReps);
+    deleteWhere += ` AND reps = $${deleteParams.length}`;
+  }
+
+  const { rowCount } = await pool.query(`DELETE FROM workout_sets WHERE ${deleteWhere}`, deleteParams);
+
+  if (rowCount === 0) {
+    console.log(`[TIMING] workout-db-updateExercise: ${Date.now() - queryStart}ms (no match)`);
+    return { found: false };
+  }
+
+  // Insert new rows
+  const caloriesPerSet = estimateCaloriesPerSet(newWeightLbs, newReps);
+  const values = [];
+  const placeholders = [];
+  for (let i = 0; i < newSets; i++) {
+    const offset = i * 5;
+    placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`);
+    values.push(today, exercise, newWeightLbs || null, newReps, caloriesPerSet);
+  }
+
+  await pool.query(`
+    INSERT INTO workout_sets (date, exercise, weight_lbs, reps, calories_burned)
+    VALUES ${placeholders.join(', ')}
+  `, values);
+  console.log(`[TIMING] workout-db-updateExercise: ${Date.now() - queryStart}ms`);
+
+  const todaySummary = await getTodaySets();
+  return { found: true, deletedSets: rowCount, newSets, todaySummary };
+}
+
+/**
+ * Delete an exercise logged today
+ */
+async function deleteExercise(exercise, weightLbs, reps) {
+  await initTable();
+  const today = getTodayKey();
+
+  const queryStart = Date.now();
+  const params = [today, exercise.toLowerCase()];
+  let where = 'date = $1 AND LOWER(exercise) = $2';
+
+  if (weightLbs != null) {
+    params.push(weightLbs);
+    where += ` AND weight_lbs = $${params.length}`;
+  }
+  if (reps != null) {
+    params.push(reps);
+    where += ` AND reps = $${params.length}`;
+  }
+
+  const { rowCount } = await pool.query(`DELETE FROM workout_sets WHERE ${where}`, params);
+  console.log(`[TIMING] workout-db-deleteExercise: ${Date.now() - queryStart}ms`);
+
+  const todaySummary = await getTodaySets();
+  return { deletedSets: rowCount, todaySummary };
+}
+
+/**
+ * Reset all workout history
+ */
+async function resetWorkoutHistory() {
+  await initTable();
+  const queryStart = Date.now();
+  const { rowCount } = await pool.query('DELETE FROM workout_sets');
+  console.log(`[TIMING] workout-db-resetHistory: ${Date.now() - queryStart}ms`);
+  return { deletedSets: rowCount };
+}
+
 module.exports = {
   logSets,
   getExerciseCaloriesToday,
   getTodaySets,
-  getWorkoutHistory
+  getWorkoutHistory,
+  updateExercise,
+  deleteExercise,
+  resetWorkoutHistory
 };
