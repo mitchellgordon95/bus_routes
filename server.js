@@ -361,4 +361,22 @@ app.get('/health', (req, res) => {
 const PORT = process.env.PORT || 3456;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+
+  // Scheduled morning workout SMS
+  const cron = require('node-cron');
+  const { sendMorningWorkout } = require('./morning-workout');
+
+  cron.schedule('0 8 * * *', () => {
+    const toNumber = process.env.MY_PHONE_NUMBER;
+    const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+    if (!toNumber || !fromNumber) {
+      console.log('[CRON] Skipping morning workout - MY_PHONE_NUMBER or TWILIO_PHONE_NUMBER not set');
+      return;
+    }
+    console.log('[CRON] Sending morning workout plan...');
+    sendMorningWorkout(sendAsyncSMS, toNumber, fromNumber)
+      .catch(err => console.error('[CRON] Morning workout failed:', err.message));
+  }, { timezone: 'America/New_York' });
+
+  console.log('Morning workout scheduled for 8:00 AM ET');
 });

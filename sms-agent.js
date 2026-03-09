@@ -64,6 +64,7 @@ Workout Tracking:
 - "workout summary" or "what did I do this week" → Call get_workout_history and summarize
 
 When generating workout plans:
+- The user has an adjustable dumbbell set, a workout bench, and a pull-up bar. No barbell, no cable machine. Only suggest exercises doable with this equipment.
 - Look at recent history to determine which muscle groups need work
 - Suggest progressive overload (slightly more weight or reps than last time)
 - Include specific exercises, weights, sets, and reps based on the user's previous performance
