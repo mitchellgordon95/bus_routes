@@ -13,17 +13,26 @@ const OVERHEAD_MULTIPLIER = 1.5; // metabolic overhead (elevated HR, EPOC)
  */
 async function initTable() {
   const start = Date.now();
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS workout_sets (
-      id SERIAL PRIMARY KEY,
-      date DATE NOT NULL,
-      exercise TEXT NOT NULL,
-      weight_lbs NUMERIC,
-      reps INTEGER NOT NULL,
-      calories_burned INTEGER NOT NULL DEFAULT 0,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
+  await Promise.all([
+    pool.query(`
+      CREATE TABLE IF NOT EXISTS workout_sets (
+        id SERIAL PRIMARY KEY,
+        date DATE NOT NULL,
+        exercise TEXT NOT NULL,
+        weight_lbs NUMERIC,
+        reps INTEGER NOT NULL,
+        calories_burned INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `),
+    pool.query(`
+      CREATE TABLE IF NOT EXISTS workout_plans (
+        date DATE PRIMARY KEY,
+        plan_text TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `)
+  ]);
   console.log(`[TIMING] workout-db-initTable: ${Date.now() - start}ms`);
 }
 
@@ -263,6 +272,37 @@ async function resetWorkoutHistory() {
   return { deletedSets: rowCount };
 }
 
+/**
+ * Save today's workout plan (upserts - regenerating overwrites)
+ */
+async function savePlan(planText) {
+  await initTable();
+  const today = getTodayKey();
+  const queryStart = Date.now();
+  await pool.query(`
+    INSERT INTO workout_plans (date, plan_text)
+    VALUES ($1, $2)
+    ON CONFLICT (date) DO UPDATE SET plan_text = $2, created_at = NOW()
+  `, [today, planText]);
+  console.log(`[TIMING] workout-db-savePlan: ${Date.now() - queryStart}ms`);
+  return { date: today };
+}
+
+/**
+ * Get workout plan for a date (defaults to today)
+ */
+async function getPlan(date) {
+  await initTable();
+  const target = date || getTodayKey();
+  const queryStart = Date.now();
+  const { rows } = await pool.query(
+    'SELECT plan_text, created_at FROM workout_plans WHERE date = $1',
+    [target]
+  );
+  console.log(`[TIMING] workout-db-getPlan: ${Date.now() - queryStart}ms`);
+  return rows[0] || null;
+}
+
 module.exports = {
   logSets,
   getExerciseCaloriesToday,
@@ -270,5 +310,7 @@ module.exports = {
   getWorkoutHistory,
   updateExercise,
   deleteExercise,
-  resetWorkoutHistory
+  resetWorkoutHistory,
+  savePlan,
+  getPlan
 };

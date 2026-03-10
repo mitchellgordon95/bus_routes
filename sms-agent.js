@@ -20,7 +20,7 @@ const {
   clearPendingAuth
 } = require('./uber-pending');
 const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
-const { logSets, getExerciseCaloriesToday, getWorkoutHistory, updateExercise, deleteExercise, resetWorkoutHistory } = require('./workout-tracker');
+const { logSets, getExerciseCaloriesToday, getWorkoutHistory, updateExercise, deleteExercise, resetWorkoutHistory, savePlan, getPlan } = require('./workout-tracker');
 
 // --- SYSTEM PROMPT ---
 const SYSTEM_PROMPT = `You are TextPal, a personal SMS assistant. You help users via text message with:
@@ -60,8 +60,9 @@ Workout Tracking:
 - Natural language like "did 3 sets of 8 on bench at 185" → Call log_exercise
 - Parse the exercise name, weight, reps, and sets from whatever format the user provides
 - Bodyweight exercises (push-ups, pull-ups, dips) have no weight
-- "workout plan", "what should I do today", "gym plan" → Call get_workout_history, then generate a plan based on the data
+- "workout plan", "what should I do today", "gym plan" → Call get_workout_history, then generate a plan based on the data. After generating the plan, ALWAYS call save_workout_plan with the full plan text.
 - "workout summary" or "what did I do this week" → Call get_workout_history and summarize
+- "today's plan", "show my plan", "what's my plan" → Call manage_workout with action "get_plan"
 - "actually did bench at 190" or "change bench to 190 3x8" → Call manage_workout with action "edit"
 - "delete bench" or "remove squats" → Call manage_workout with action "delete"
 - "reset workout history" → Call manage_workout with action "reset"
@@ -226,12 +227,23 @@ const TOOLS = [
     }
   },
   {
-    name: 'manage_workout',
-    description: 'Edit, delete, or reset workout entries.',
+    name: 'save_workout_plan',
+    description: 'Save today\'s workout plan. Call this after generating a workout plan for the user.',
     input_schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['edit', 'delete', 'reset'], description: 'The action to perform' },
+        plan_text: { type: 'string', description: 'The full workout plan text to save' }
+      },
+      required: ['plan_text']
+    }
+  },
+  {
+    name: 'manage_workout',
+    description: 'Edit, delete, or reset workout entries, or retrieve today\'s plan.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['edit', 'delete', 'reset', 'get_plan'], description: 'The action to perform' },
         exercise: { type: 'string', description: 'Exercise name to edit/delete' },
         old_weight_lbs: { type: 'number', description: 'Current weight to match (for edit)' },
         old_reps: { type: 'number', description: 'Current reps to match (for edit)' },
@@ -385,6 +397,11 @@ const toolHandlers = {
     return { result: text };
   },
 
+  async save_workout_plan(input, ctx) {
+    await savePlan(input.plan_text);
+    return { result: 'Plan saved.' };
+  },
+
   async manage_workout(input, ctx) {
     switch (input.action) {
       case 'edit': {
@@ -435,6 +452,11 @@ const toolHandlers = {
       case 'reset': {
         const result = await resetWorkoutHistory();
         return { result: `Workout history cleared. ${result.deletedSets} total set${result.deletedSets !== 1 ? 's' : ''} removed.` };
+      }
+      case 'get_plan': {
+        const plan = await getPlan();
+        if (!plan) return { result: 'No workout plan saved for today. Text "workout plan" to generate one.' };
+        return { result: `Today's plan:\n\n${plan.plan_text}` };
       }
       default:
         return { error: `Unknown action: ${input.action}` };
@@ -681,7 +703,17 @@ async function handleSMS({ message, fromNumber, twilioNumber, imageBuffer, image
 
     // If end_turn with no tool calls, extract text response
     if (response.stop_reason === 'end_turn') {
-      const textBlock = response.content.find(c => c.type === 'text');
+      let textBlock = response.content.find(c => c.type === 'text');
+      // If no text in final response, check if the previous assistant turn had text
+      // (happens when Claude generates text + tool_use, then end_turn with no text)
+      if (!textBlock?.text && messages.length >= 2) {
+        const prevAssistant = messages[messages.length - 2];
+        if (prevAssistant.role === 'assistant' || Array.isArray(prevAssistant.content)) {
+          const prevContent = Array.isArray(prevAssistant.content) ? prevAssistant.content : prevAssistant;
+          const prevText = prevContent.find?.(c => c.type === 'text');
+          if (prevText?.text) textBlock = prevText;
+        }
+      }
       console.log(`[TIMING] agent-total: ${Date.now() - requestStart}ms (${iterations} iteration${iterations > 1 ? 's' : ''})`);
       return { reply: textBlock?.text || 'Sorry, I could not process that.', isAsync: false };
     }

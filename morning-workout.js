@@ -1,5 +1,5 @@
 const Anthropic = require('@anthropic-ai/sdk');
-const { getWorkoutHistory } = require('./workout-tracker');
+const { getWorkoutHistory, savePlan } = require('./workout-tracker');
 
 const anthropic = new Anthropic();
 const MODEL = 'claude-sonnet-4-5-20250929';
@@ -59,8 +59,9 @@ async function sendMorningWorkout(sendSMS, toNumber, fromNumber) {
   const plan = response.content.find(c => c.type === 'text')?.text
     || 'Could not generate workout plan. Text "workout plan" to try manually.';
 
+  await savePlan(plan);
   await sendSMS(toNumber, fromNumber, plan);
-  console.log('[CRON] Morning workout sent');
+  console.log('[CRON] Morning workout saved and sent');
 }
 
 module.exports = { sendMorningWorkout };
