@@ -27,22 +27,20 @@ Rules:
 async function sendMorningWorkout(sendSMS, toNumber, fromNumber) {
   const history = await getWorkoutHistory(14);
 
+  // Format history for Claude (may be empty)
+  let historyText;
   if (history.length === 0) {
-    await sendSMS(toNumber, fromNumber,
-      'Good morning! Text me your workouts (e.g. "bench 185 3x8") to get personalized daily plans.');
-    console.log('[CRON] No workout history - sent nudge');
-    return;
-  }
-
-  // Format history for Claude
-  let historyText = 'Recent workout history:\n';
-  for (const day of history) {
-    historyText += `\n${day.date}:`;
-    for (const ex of day.exercises) {
-      let entry = ` ${ex.exercise}`;
-      if (ex.weightLbs) entry += ` ${ex.weightLbs}lbs`;
-      entry += ` ${ex.sets}x${ex.reps}`;
-      historyText += `\n  - ${entry}`;
+    historyText = 'No recent workout history available. Generate a well-rounded full body workout with moderate weights.';
+  } else {
+    historyText = 'Recent workout history:\n';
+    for (const day of history) {
+      historyText += `\n${day.date}:`;
+      for (const ex of day.exercises) {
+        let entry = ` ${ex.exercise}`;
+        if (ex.weightLbs) entry += ` ${ex.weightLbs}lbs`;
+        entry += ` ${ex.sets}x${ex.reps}`;
+        historyText += `\n  - ${entry}`;
+      }
     }
   }
 
