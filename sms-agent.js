@@ -62,6 +62,7 @@ Workout Tracking:
 - Parse the exercise name, weight, reps, and sets from whatever format the user provides
 - Users may log one set at a time. Each log accumulates with previous sets of the same exercise today.
 - Users may rate difficulty: easy (progress next time), medium (on track), hard (hold or reduce). Include in log_exercise if mentioned.
+- After logging a set, call manage_workout with action "get_plan" to check today's plan. Compare what's been done so far to the plan and tell the user what to do next (e.g. "Next up: dumbbell rows 45lbs 3x8").
 - Bodyweight exercises (push-ups, pull-ups, dips) have no weight
 - Available dumbbell weights: 15, 25, 35, 45, 55 lbs only. Always suggest these exact weights.
 - "workout plan", "what should I do today", "gym plan" → Call get_workout_history, then generate a plan based on the data. After generating the plan, ALWAYS call save_workout_plan with the full plan text.
