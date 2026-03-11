@@ -21,6 +21,7 @@ const {
 } = require('./uber-pending');
 const { getUberQuote, confirmUberRide, getUberStatus, cancelUberRide } = require('./uber-agent');
 const { logSets, getExerciseCaloriesToday, getWorkoutHistory, updateExercise, deleteExercise, resetWorkoutHistory, savePlan, getPlan } = require('./workout-tracker');
+const { saveMessage, getRecentMessages } = require('./conversation-history');
 
 // --- SYSTEM PROMPT ---
 const SYSTEM_PROMPT = `You are TextPal, a personal SMS assistant. You help users via text message with:
@@ -56,10 +57,13 @@ Uber Rides:
 - "uber auth 123456" or "uber code 123456" -> Call manage_uber_ride with action "auth"
 
 Workout Tracking:
-- Exercise descriptions like "bench 185 3x8", "squat 225 5x5", "pull-ups 3x10" → Call log_exercise
-- Natural language like "did 3 sets of 8 on bench at 185" → Call log_exercise
+- Exercise descriptions like "bench 45 3x8", "squat 55 5x5", "pull-ups 3x10" → Call log_exercise
+- Natural language like "did 3 sets of 8 on bench at 45" → Call log_exercise
 - Parse the exercise name, weight, reps, and sets from whatever format the user provides
+- Users may log one set at a time. Each log accumulates with previous sets of the same exercise today.
+- Users may rate difficulty: easy (progress next time), medium (on track), hard (hold or reduce). Include in log_exercise if mentioned.
 - Bodyweight exercises (push-ups, pull-ups, dips) have no weight
+- Available dumbbell weights: 15, 25, 35, 45, 55 lbs only. Always suggest these exact weights.
 - "workout plan", "what should I do today", "gym plan" → Call get_workout_history, then generate a plan based on the data. After generating the plan, ALWAYS call save_workout_plan with the full plan text.
 - "workout summary" or "what did I do this week" → Call get_workout_history and summarize
 - "today's plan", "show my plan", "what's my plan" → Call manage_workout with action "get_plan"
@@ -69,8 +73,9 @@ Workout Tracking:
 
 When generating workout plans:
 - Only generate a plan for TODAY. Do not give multi-day plans unless the user explicitly asks for one.
-- The user has an adjustable dumbbell set, a workout bench, and a pull-up bar. No barbell, no cable machine. Only suggest exercises doable with this equipment.
+- The user has an adjustable dumbbell set (15, 25, 35, 45, 55 lbs), a workout bench, and a pull-up bar. No barbell, no cable machine. Only suggest exercises doable with this equipment using these exact weights.
 - Look at recent history to determine which muscle groups need work
+- Use difficulty ratings from history to guide progression: easy → increase weight, medium → add reps, hard → hold or reduce
 - Suggest progressive overload (slightly more weight or reps than last time)
 - Include specific exercises, weights, sets, and reps based on the user's previous performance
 - If no history exists, ask about experience level and goals to create a starter plan
@@ -210,7 +215,8 @@ const TOOLS = [
         exercise: { type: 'string', description: 'Exercise name (e.g., "bench press", "squat", "pull-ups")' },
         weight_lbs: { type: 'number', description: 'Weight in pounds. Omit or 0 for bodyweight exercises.' },
         reps: { type: 'number', description: 'Reps per set' },
-        sets: { type: 'number', description: 'Number of sets (default 1)' }
+        sets: { type: 'number', description: 'Number of sets (default 1). Users often log one set at a time.' },
+        difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'How difficult the set felt. Optional.' }
       },
       required: ['exercise', 'reps']
     }
@@ -350,7 +356,8 @@ const toolHandlers = {
       input.exercise,
       input.weight_lbs || null,
       input.reps,
-      input.sets || 1
+      input.sets || 1,
+      input.difficulty || null
     );
 
     const [baseTarget, exerciseCals] = await Promise.all([
@@ -361,6 +368,7 @@ const toolHandlers = {
     let text = `Logged: ${result.exercise}`;
     if (result.weightLbs) text += ` ${result.weightLbs} lbs`;
     text += ` - ${result.setsLogged} set${result.setsLogged > 1 ? 's' : ''} of ${result.reps}`;
+    if (input.difficulty) text += ` (${input.difficulty})`;
     text += ` (~${result.totalCaloriesThisExercise} cal)`;
 
     if (result.todaySummary.length > 0) {
@@ -369,6 +377,7 @@ const toolHandlers = {
         let entry = s.exercise;
         if (s.weightLbs) entry += ` ${s.weightLbs}`;
         entry += ` ${s.sets}x${s.reps}`;
+        if (s.difficulty) entry += ` ${s.difficulty}`;
         return entry;
       }).join(', ');
     }
@@ -391,6 +400,7 @@ const toolHandlers = {
         let entry = ` ${ex.exercise}`;
         if (ex.weightLbs) entry += ` ${ex.weightLbs}lbs`;
         entry += ` ${ex.sets}x${ex.reps}`;
+        if (ex.difficulty) entry += ` (${ex.difficulty})`;
         text += `\n  -${entry}`;
       }
     }
@@ -685,7 +695,9 @@ async function handleSMS({ message, fromNumber, twilioNumber, imageBuffer, image
   }
   userContent.push({ type: 'text', text: message || '(image with no text)' });
 
-  const messages = [{ role: 'user', content: userContent }];
+  // Load conversation history for context continuity
+  const history = await getRecentMessages(fromNumber);
+  const messages = [...history, { role: 'user', content: userContent }];
 
   let iterations = 0;
   while (iterations < MAX_AGENT_ITERATIONS) {
@@ -715,7 +727,10 @@ async function handleSMS({ message, fromNumber, twilioNumber, imageBuffer, image
         }
       }
       console.log(`[TIMING] agent-total: ${Date.now() - requestStart}ms (${iterations} iteration${iterations > 1 ? 's' : ''})`);
-      return { reply: textBlock?.text || 'Sorry, I could not process that.', isAsync: false };
+      const reply = textBlock?.text || 'Sorry, I could not process that.';
+      await saveMessage(fromNumber, 'user', userContent);
+      await saveMessage(fromNumber, 'assistant', reply);
+      return { reply, isAsync: false };
     }
 
     // Execute tool calls
@@ -723,7 +738,10 @@ async function handleSMS({ message, fromNumber, twilioNumber, imageBuffer, image
     if (toolUseBlocks.length === 0) {
       const textBlock = response.content.find(c => c.type === 'text');
       console.log(`[TIMING] agent-total: ${Date.now() - requestStart}ms (no tools, ${iterations} iteration${iterations > 1 ? 's' : ''})`);
-      return { reply: textBlock?.text || 'Sorry, I could not process that.', isAsync: false };
+      const reply = textBlock?.text || 'Sorry, I could not process that.';
+      await saveMessage(fromNumber, 'user', userContent);
+      await saveMessage(fromNumber, 'assistant', reply);
+      return { reply, isAsync: false };
     }
 
     const toolResults = [];
@@ -772,6 +790,8 @@ async function handleSMS({ message, fromNumber, twilioNumber, imageBuffer, image
     // If an async tool was called, short-circuit without another Claude API call
     if (asyncResult) {
       console.log(`[TIMING] agent-total: ${Date.now() - requestStart}ms (async short-circuit)`);
+      await saveMessage(fromNumber, 'user', userContent);
+      await saveMessage(fromNumber, 'assistant', asyncResult.acknowledgment);
       return { reply: asyncResult.acknowledgment, isAsync: true };
     }
 
@@ -781,7 +801,10 @@ async function handleSMS({ message, fromNumber, twilioNumber, imageBuffer, image
   }
 
   console.log(`[TIMING] agent-total: ${Date.now() - requestStart}ms (max iterations reached)`);
-  return { reply: 'Sorry, I could not process that. Text "how" for available commands.', isAsync: false };
+  const fallbackReply = 'Sorry, I could not process that. Text "how" for available commands.';
+  await saveMessage(fromNumber, 'user', userContent);
+  await saveMessage(fromNumber, 'assistant', fallbackReply);
+  return { reply: fallbackReply, isAsync: false };
 }
 
 module.exports = { handleSMS };

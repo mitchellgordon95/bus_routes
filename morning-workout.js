@@ -8,11 +8,14 @@ const SYSTEM_PROMPT = `You are a concise personal trainer sending a morning work
 
 Equipment available: adjustable dumbbell set, a workout bench, and a pull-up bar. No barbell, no cable machine.
 
+Available dumbbell weights: 15, 25, 35, 45, 55 lbs only. Always prescribe these exact weights.
+
 Rules:
 - Keep it SHORT and SMS-friendly. Plain text only, no markdown.
-- Only suggest exercises doable with dumbbells and a bench.
+- Only suggest exercises doable with dumbbells, a bench, and a pull-up bar.
 - Include specific exercises, weights, sets, and reps based on the user's recent history.
 - Suggest progressive overload: slightly more weight or reps than last time where appropriate.
+- If the user rated a set "easy", increase weight next time. If "hard", hold or reduce.
 - Rotate muscle groups so recently worked muscles get rest.
 - If a muscle group hasn't been trained in 3+ days, prioritize it.
 - Format each exercise on its own line with weight, sets x reps.
@@ -39,6 +42,7 @@ async function sendMorningWorkout(sendSMS, toNumber, fromNumber) {
         let entry = ` ${ex.exercise}`;
         if (ex.weightLbs) entry += ` ${ex.weightLbs}lbs`;
         entry += ` ${ex.sets}x${ex.reps}`;
+        if (ex.difficulty) entry += ` (${ex.difficulty})`;
         historyText += `\n  - ${entry}`;
       }
     }

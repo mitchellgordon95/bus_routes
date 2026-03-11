@@ -33,6 +33,9 @@ async function initTable() {
       )
     `)
   ]);
+  // Migration: add difficulty column
+  await pool.query('ALTER TABLE workout_sets ADD COLUMN IF NOT EXISTS difficulty TEXT')
+    .catch(() => {});
   console.log(`[TIMING] workout-db-initTable: ${Date.now() - start}ms`);
 }
 
@@ -62,7 +65,7 @@ function estimateCaloriesPerSet(weightLbs, reps) {
  * @param {number} numSets - Number of sets to log
  * @returns {Promise<Object>} Log result with calorie info
  */
-async function logSets(exercise, weightLbs, reps, numSets = 1) {
+async function logSets(exercise, weightLbs, reps, numSets = 1, difficulty = null) {
   await initTable();
   const today = getTodayKey();
   const caloriesPerSet = estimateCaloriesPerSet(weightLbs, reps);
@@ -73,13 +76,13 @@ async function logSets(exercise, weightLbs, reps, numSets = 1) {
   const values = [];
   const placeholders = [];
   for (let i = 0; i < numSets; i++) {
-    const offset = i * 5;
-    placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`);
-    values.push(today, exercise, weightLbs || null, reps, caloriesPerSet);
+    const offset = i * 6;
+    placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`);
+    values.push(today, exercise, weightLbs || null, reps, caloriesPerSet, difficulty);
   }
 
   await pool.query(`
-    INSERT INTO workout_sets (date, exercise, weight_lbs, reps, calories_burned)
+    INSERT INTO workout_sets (date, exercise, weight_lbs, reps, calories_burned, difficulty)
     VALUES ${placeholders.join(', ')}
   `, values);
   console.log(`[TIMING] workout-db-logSets: ${Date.now() - queryStart}ms`);
@@ -128,10 +131,10 @@ async function getTodaySets() {
 
   const queryStart = Date.now();
   const { rows } = await pool.query(`
-    SELECT exercise, weight_lbs, reps, COUNT(*) as num_sets, SUM(calories_burned) as total_cals
+    SELECT exercise, weight_lbs, reps, difficulty, COUNT(*) as num_sets, SUM(calories_burned) as total_cals
     FROM workout_sets
     WHERE date = $1
-    GROUP BY exercise, weight_lbs, reps
+    GROUP BY exercise, weight_lbs, reps, difficulty
     ORDER BY MIN(created_at)
   `, [today]);
   console.log(`[TIMING] workout-db-getTodaySets: ${Date.now() - queryStart}ms`);
@@ -140,6 +143,7 @@ async function getTodaySets() {
     exercise: r.exercise,
     weightLbs: r.weight_lbs ? parseFloat(r.weight_lbs) : null,
     reps: r.reps,
+    difficulty: r.difficulty || null,
     sets: parseInt(r.num_sets, 10),
     calories: parseInt(r.total_cals, 10)
   }));
@@ -155,10 +159,10 @@ async function getWorkoutHistory(days = 14) {
 
   const queryStart = Date.now();
   const { rows } = await pool.query(`
-    SELECT date, exercise, weight_lbs, reps, COUNT(*) as num_sets
+    SELECT date, exercise, weight_lbs, reps, difficulty, COUNT(*) as num_sets
     FROM workout_sets
     WHERE date >= CURRENT_DATE - $1::INTEGER
-    GROUP BY date, exercise, weight_lbs, reps
+    GROUP BY date, exercise, weight_lbs, reps, difficulty
     ORDER BY date DESC, MIN(created_at)
   `, [days]);
   console.log(`[TIMING] workout-db-getHistory: ${Date.now() - queryStart}ms`);
@@ -174,6 +178,7 @@ async function getWorkoutHistory(days = 14) {
       exercise: row.exercise,
       weightLbs: row.weight_lbs ? parseFloat(row.weight_lbs) : null,
       reps: row.reps,
+      difficulty: row.difficulty || null,
       sets: parseInt(row.num_sets, 10)
     });
   }
@@ -187,7 +192,7 @@ async function getWorkoutHistory(days = 14) {
 /**
  * Update an exercise logged today (delete old rows, insert new ones)
  */
-async function updateExercise(exercise, oldWeightLbs, oldReps, newWeightLbs, newReps, newSets) {
+async function updateExercise(exercise, oldWeightLbs, oldReps, newWeightLbs, newReps, newSets, newDifficulty = null) {
   await initTable();
   const today = getTodayKey();
 
@@ -219,13 +224,13 @@ async function updateExercise(exercise, oldWeightLbs, oldReps, newWeightLbs, new
   const values = [];
   const placeholders = [];
   for (let i = 0; i < newSets; i++) {
-    const offset = i * 5;
-    placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`);
-    values.push(today, exercise, newWeightLbs || null, newReps, caloriesPerSet);
+    const offset = i * 6;
+    placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`);
+    values.push(today, exercise, newWeightLbs || null, newReps, caloriesPerSet, newDifficulty);
   }
 
   await pool.query(`
-    INSERT INTO workout_sets (date, exercise, weight_lbs, reps, calories_burned)
+    INSERT INTO workout_sets (date, exercise, weight_lbs, reps, calories_burned, difficulty)
     VALUES ${placeholders.join(', ')}
   `, values);
   console.log(`[TIMING] workout-db-updateExercise: ${Date.now() - queryStart}ms`);
