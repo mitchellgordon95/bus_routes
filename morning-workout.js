@@ -1,5 +1,5 @@
 const Anthropic = require('@anthropic-ai/sdk');
-const { getWorkoutHistory, savePlan } = require('./workout-tracker');
+const { getWorkoutHistory, savePlan, getPlan } = require('./workout-tracker');
 
 const anthropic = new Anthropic();
 const MODEL = 'claude-sonnet-4-5-20250929';
@@ -18,6 +18,7 @@ Rules:
 - If the user rated a set "easy", increase weight next time. If "hard", hold or reduce.
 - Rotate muscle groups so recently worked muscles get rest.
 - If a muscle group hasn't been trained in 3+ days, prioritize it.
+- If yesterday's plan is provided, compare it to what was actually logged. Muscle groups that were planned but not completed should be prioritized today.
 - Format each exercise on its own line with weight, sets x reps.
 - End with a brief motivating note (one short sentence max).`;
 
@@ -48,6 +49,17 @@ async function sendMorningWorkout(sendSMS, toNumber, fromNumber) {
     }
   }
 
+  // Fetch yesterday's plan to detect skipped exercises
+  const yesterday = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayKey = yesterday.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const yesterdayPlan = await getPlan(yesterdayKey);
+
+  let prompt = `Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' })}. Generate today's workout plan.\n\n${historyText}`;
+  if (yesterdayPlan) {
+    prompt += `\n\nYesterday's plan was:\n${yesterdayPlan.plan_text}\n\nCompare this to what was actually logged yesterday. Prioritize any muscle groups that were planned but skipped.`;
+  }
+
   const apiStart = Date.now();
   const response = await anthropic.messages.create({
     model: MODEL,
@@ -55,7 +67,7 @@ async function sendMorningWorkout(sendSMS, toNumber, fromNumber) {
     system: SYSTEM_PROMPT,
     messages: [{
       role: 'user',
-      content: `Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' })}. Generate today's workout plan.\n\n${historyText}`
+      content: prompt
     }]
   });
   console.log(`[CRON] Claude response: ${Date.now() - apiStart}ms`);
